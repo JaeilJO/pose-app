@@ -38,6 +38,7 @@ export class Poser {
     this.legReach = rig.length('shin.L') + rig.length('foot.L');
     this.ankleHeight = Math.min(rig.worldPos('foot.L').y, rig.worldPos('foot.R').y);
     this.active = null; // effector drag
+    this.collider = null; // optional: keeps limbs out of the body (see collide.js)
     this.fk = null; // bone rotation drag
     this.t = {
       a: new THREE.Vector3(), b: new THREE.Vector3(), c: new THREE.Vector3(),
@@ -324,11 +325,15 @@ export class Poser {
       for (const leg of ['foot.L', 'foot.R']) {
         if (this.pins[leg] && active?.name !== leg) this.solveLimb(leg, this.pinData[leg].p, keep[leg]);
       }
+      // a hand or foot dragged into the body stops at its surface
+      const target = active && this.collider && LIMBS.includes(active.name)
+        ? this.collider.projectOut(active.name, active.target, EFFECTORS[active.name].kind === 'arm' ? 0.03 : 0.045)
+        : active?.target;
       if (active && EFFECTORS[active.name].kind === 'leg') {
-        this.solveLimb(active.name, active.target, keep[active.name]); // feet stay flat
+        this.solveLimb(active.name, target, keep[active.name]); // feet stay flat
       }
       if (active && EFFECTORS[active.name].kind === 'arm') {
-        this.solveLimb(active.name, active.target, keep[active.name], active.localQ); // hand follows forearm
+        this.solveLimb(active.name, target, keep[active.name], active.localQ); // hand follows forearm
       }
       for (const arm of ['hand.L', 'hand.R']) {
         if (this.pins[arm] && active?.name !== arm) this.solveLimb(arm, this.pinData[arm].p, keep[arm]);
@@ -338,6 +343,12 @@ export class Poser {
       }
     }
 
+    if (this.collider) {
+      for (const limb of LIMBS) {
+        if (active?.name !== limb && this.pins[limb]) continue; // pinned limbs stay exactly where they were put
+        this.collider.resolve(limb, EFFECTORS[limb].kind === 'leg' ? keep[limb] : null);
+      }
+    }
     if (active && active.name !== 'head' && !this.pins.head && !this.neckLocked) this.stabilizeHead();
     this.rig.update();
   }

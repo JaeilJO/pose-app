@@ -6,6 +6,7 @@ import { buildProxies } from './proxies.js';
 import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, HEIGHT_RANGE_CM, MODELS, MODEL_NAMES } from './human.js';
 import { Skirt } from './cloth.js';
 import { Jiggle } from './jiggle.js';
+import { Collider } from './collide.js';
 import { STRINGS, detectLang } from './i18n.js';
 
 // ---------- renderer / scene ----------
@@ -95,6 +96,7 @@ function loadModel(name) {
   jiggle = new Jiggle(next, body.mesh, MODELS[name]); // needs the standing rest pose
   jiggle.setAmounts(softness(name, shapeValues[name]));
   const nextPoser = new Poser(next);
+  nextPoser.collider = new Collider(next, body.mesh); // built in the rest pose
   if (old) {
     transferPose(old.rig, next);
     nextPoser.pins = { ...old.poser.pins };

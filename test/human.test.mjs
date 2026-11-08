@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, MODELS } from '../src/human.js';
 import { Poser } from '../src/poser.js';
 import { Jiggle } from '../src/jiggle.js';
+import { Collider } from '../src/collide.js';
 import { hingeAngle } from '../src/ik.js';
 
 let failed = 0;
@@ -134,6 +135,20 @@ for (const m of ['male', 'female']) {
   const spread = (vals) => { const sh = shapeBody(data, { ...data.shapeBase, ...vals }); const r = createHumanRig(data, sh); buildHuman(r, data, sh); const d = r.worldPos('foreArm.L').sub(r.worldPos('upperArm.L')).normalize(); return Math.atan2(d.x, -d.y) * 180 / Math.PI; };
   const lean = spread({ weight: 0 }), heavy = spread({ weight: 1 });
   ok(lean > 0 && lean < 15 && heavy > lean + 3, `${m} arms hang close and clear a heavier body (${lean.toFixed(1)}° → ${heavy.toFixed(1)}°)`);
+}
+for (const m of ['male', 'female']) {
+  const { rig, body, poser } = fresh(m);
+  const col = new Collider(rig, body.mesh);
+  poser.collider = col;
+  col.updateWorld();
+  ok(['hand.L', 'hand.R', 'foot.L', 'foot.R'].every((l) => !col.deepest(l)), `${m} rest pose: no limb touches the body`);
+  const hp = rig.worldPos('hips');
+  drag(poser, 'hand.L', v(-0.02, hp.y + 0.12, hp.z + 0.06), 40); // into the belly
+  drag(poser, 'foot.R', v(0.2, 0.12, 0.04), 40); // across the other leg
+  col.updateWorld();
+  const worst = Math.max(...['hand.L', 'foot.R'].map((l) => col.deepest(l)?.o || 0));
+  ok(worst < 0.004, `${m} hand into the belly and foot across the leg stay outside (worst overlap ${(worst * 1000).toFixed(1)} mm)`);
+  ok(poser.handleWorld('hand.L').z > hp.z, `${m} the hand stops in front of the belly, not behind the back`);
 }
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);
