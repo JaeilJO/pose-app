@@ -314,18 +314,76 @@ def ray_hits(O, D, P, T, maxd=0.06, eps=1e-4):
 
 
 import os
-FACE = dict(nose_its=2, nose_gain=1.2, nose_r=0.013, eye_its=200, mouth_its=8, coarse_its=20, sock_depth=0.01, sock_up=0.006,
-            bulge=0.003, eye_relax=60, dscale=1.0, tangent_its=20, eye_gain=1.0, eye_zero=0.0)
+FACE = dict(nose_its=2, nose_gain=1.2, nose_r=0.013, eye_its=200, mouth_its=8, coarse_its=20, sock_depth=0.007, sock_up=0.006,
+            bulge=0.004, eye_relax=60, dscale=1.0, tangent_its=20, eye_gain=1.0, eye_zero=0.0, rx=2.06,
+            patch_rx=0.026, patch_ry=0.017, ball_rx=0.014, ball_ry=0.009, ball_dn=0.0, patch_grow=1)
 FACE.update({k: type(FACE[k])(v) for k, v in (a.split('=') for a in os.environ.get('FACE', '').split(',') if a)})
 FEATURE_BONES = ('eye', 'levator', 'oculi', 'orbicularis', 'oris', 'risorius', 'special', 'tongue')
 
 
+def loop_point(P, L, u):
+    """Point at arc-length fraction u (0..1) along closed loop L."""
+    Q = P[L]
+    seg = np.linalg.norm(np.roll(Q, -1, 0) - Q, axis=1)
+    cum = np.r_[0, np.cumsum(seg)] / seg.sum()
+    j = min(np.searchsorted(cum, u, side='right') - 1, len(L) - 1)
+    t = (u - cum[j]) / max(cum[j + 1] - cum[j], 1e-12)
+    return Q[j] * (1 - t) + Q[(j + 1) % len(L)] * t
+
+
+def loop_params(P, L):
+    Q = P[L]
+    seg = np.linalg.norm(np.roll(Q, -1, 0) - Q, axis=1)
+    return np.r_[0, np.cumsum(seg)[:-1]] / seg.sum()
+
+
+def cap_all(P, loops, caps, loops2, caps2):
+    P2 = np.vstack([P, cap_points(P, loops, caps)])
+    return np.vstack([P2, cap_points(P2, loops2, caps2)]) if caps2 else P2
+
+
+def ring_caps(P, loops, base):
+    """Cap each loop with rings that shrink in vertex count toward the centre, so no cap vertex has
+    a high valence (those show up as star-shaped pinches once subdivided). New vertices start at `base`.
+    Returns (triangles, caps) with caps = [(loop, arc-length param or -1 for the centre, pull toward centre)]."""
+    fill, caps = [], []
+    for li, L in enumerate(loops):
+        sizes = []
+        k = len(L)
+        while k > 6:
+            k = max(6, int(round(k * 0.62)))
+            sizes.append(k)
+        R = len(sizes)
+        prev, pu = list(L), list(loop_params(P, L))
+        for r, size in enumerate(sizes, 1):
+            cur = list(range(base + len(caps), base + len(caps) + size))
+            cu = [j / size for j in range(size)]
+            caps += [(li, u, r / (R + 1)) for u in cu]
+            i = j = 0
+            a_, b_ = len(prev), size
+            while i < a_ or j < b_:
+                nu_p = pu[i + 1] if i + 1 < a_ else 1.0
+                nu_c = cu[j + 1] if j + 1 < b_ else 1.0
+                if j >= b_ or (i < a_ and nu_p <= nu_c):
+                    fill.append((prev[(i + 1) % a_], prev[i % a_], cur[j % b_]))
+                    i += 1
+                else:
+                    fill.append((prev[i % a_], cur[j % b_], cur[(j + 1) % b_]))
+                    j += 1
+            prev, pu = cur, cu
+        ci = base + len(caps)
+        caps.append((li, -1, 1.0))
+        for j in range(len(prev)):
+            fill.append((prev[(j + 1) % len(prev)], prev[j], ci))
+    return fill, caps
+
+
 def cap_points(P, loops, caps):
-    """Positions of the cap vertices: each ring lerps its loop vertex toward the loop centre."""
+    """Cap vertices: rings of points along each loop (by arc length), pulled toward its centre."""
     out = [np.zeros((0, 3))]
-    for li, j, f in caps:
+    for li, u, f in caps:
         c = P[loops[li]].mean(0)
-        out.append((c if j < 0 else P[loops[li][j]] * (1 - f) + c * f)[None])
+        out.append((c if u < 0 else loop_point(P, loops[li], u) * (1 - f) + c * f)[None])
     return np.vstack(out)
 
 
@@ -369,24 +427,29 @@ def _faceless(P, tris, Wu, topo=None, interior=None):
             interior = np.zeros(n, bool)
             interior[cand[ray_hits(P[cand] + N[cand] * 2e-4, N[cand], P, near)]] = True  # inside eye sockets / mouth
         kept = largest_component(tris[~interior[tris].any(1)], n)
+        # where the upper and lower lids (and lips) meet, MakeHuman has vertices on top of each other;
+        # weld them, or the corners pinch once the face is smoothed and subdivided
+        from scipy.spatial import cKDTree as _KD
+        _fv = np.unique(kept[(feat[kept] > 0.02).any(1)])
+        weld = np.arange(n)
+        for a_, b_ in sorted(_KD(P[_fv]).query_pairs(float(os.environ.get('WELD', 6e-4)))):
+            ra, rb = weld[_fv[a_]], weld[_fv[b_]]
+            while weld[ra] != ra: ra = weld[ra]
+            while weld[rb] != rb: rb = weld[rb]
+            if ra != rb:
+                weld[max(ra, rb)] = min(ra, rb)
+        for i_ in range(n):
+            r_ = i_
+            while weld[r_] != r_: r_ = weld[r_]
+            weld[i_] = r_
+        kept = weld[kept]
+        kept = kept[(kept[:, 0] != kept[:, 1]) & (kept[:, 1] != kept[:, 2]) & (kept[:, 0] != kept[:, 2])]
+        _ks = np.sort(kept, 1)
+        _, _first = np.unique(_ks, axis=0, return_index=True)
+        kept = kept[np.sort(_first)]
+        print(f'  welded {(weld != np.arange(n)).sum()} lid/lip corner verts')
         loops = boundary_loops(kept)
-        # cap each opening with concentric rings
-        fill, caps = [], []  # caps: (loop index, vertex in loop or -1 for the centre, lerp toward centre)
-        for li, L in enumerate(loops):
-            m_ = len(L)
-            rings = max(1, min(4, m_ // 8))
-            prev = list(L)
-            for r in range(1, rings + 1):
-                cur = list(range(n + len(caps), n + len(caps) + m_))
-                caps += [(li, j, r / (rings + 1)) for j in range(m_)]
-                for j in range(m_):
-                    a, b, c, d = prev[j], prev[(j + 1) % m_], cur[(j + 1) % m_], cur[j]
-                    fill += [(b, a, d), (b, d, c)]
-                prev = cur
-            ci = n + len(caps)
-            caps.append((li, -1, 1.0))
-            for j in range(m_):
-                fill.append((prev[(j + 1) % m_], prev[j], ci))
+        fill, caps = ring_caps(P, loops, n)
         T2 = np.vstack([kept, np.array(fill)])
         n2 = n + len(caps)
         used = np.unique(T2)
@@ -397,9 +460,25 @@ def _faceless(P, tris, Wu, topo=None, interior=None):
         mouth = max((k for k in range(len(loops)) if abs(cen[k, 0]) < 0.005), key=lambda k: len(loops[k]))
         ye, ym = cen[eyes, 1].mean(), cen[mouth, 1]
         xe = np.abs(cen[eyes, 0]).mean()
-        cy, ry, rx, zmin = (ye + ym) / 2 + 0.13 * (ye - ym), 1.03 * (ye - ym), 2.06 * xe, cen[mouth, 2] - 0.065
-        P2 = np.vstack([P, cap_points(P, loops, caps)])
-        hw = np.r_[Wu[:, IDX['head']] / Wu.sum(1), np.ones(len(caps))]
+        cy, ry, rx, zmin = (ye + ym) / 2 + 0.13 * (ye - ym), 1.03 * (ye - ym), FACE['rx'] * xe, cen[mouth, 2] - 0.065
+        loops2, caps2 = [], []
+        if FACE['patch_rx'] > 0:
+            # eyes: cut out an elliptical patch around each (lids and all) and close it with a clean, even cap
+            P2 = np.vstack([P, cap_points(P, loops, caps)])
+            inside = np.zeros(n2, bool)
+            sc_ = min(1.0, 0.78 * xe / FACE['patch_rx'])  # smaller heads: keep the two patches apart
+            for k in eyes:
+                inside |= ((((P2[:, 0] - cen[k, 0]) / (sc_ * FACE['patch_rx'])) ** 2 + ((P2[:, 1] - cen[k, 1]) / (sc_ * FACE['patch_ry'])) ** 2) < 1) & (P2[:, 2] > cen[k, 2] - 0.03)
+            print(f'  eye patches: {inside.sum()} verts replaced (scale {sc_:.2f})')
+            T2 = T2[~inside[T2].any(1)]
+            loops2 = boundary_loops(T2)
+            assert len(loops2) == 2, f'eye patches: expected 2 holes, got {len(loops2)}'
+            fill2, caps2 = ring_caps(P2, loops2, n2)
+            T2 = np.vstack([T2, np.array(fill2)])
+            n2 += len(caps2)
+            used = np.unique(T2)
+        P2 = cap_all(P, loops, caps, loops2, caps2)
+        hw = np.r_[Wu[:, IDX['head']] / Wu.sum(1), np.ones(n2 - n)]
         e = (P2[:, 0] / rx) ** 2 + ((P2[:, 1] - cy) / ry) ** 2
         region = (e < 1) & (P2[:, 2] > zmin) & (hw > 0.5)
         region[n:] = True
@@ -430,13 +509,23 @@ def _faceless(P, tris, Wu, topo=None, interior=None):
         m_nose = m_nose * (1 - m_eye) ** 2  # keep the eye corners out of the nose detail
         m_ball = np.max([np.exp(-(((x - cen[k, 0]) / 0.012) ** 2 + ((y - cen[k, 1]) / 0.010) ** 2)) for k in eyes], axis=0)
         masks = {k: v * region for k, v in dict(nose=m_nose, eye=m_eye, mouth=m_mouth, sock=m_sock, ball=m_ball).items()}
+        # eye patches: rebuilt smooth (no lid geometry at all), then a closed-eye mound is added
+        m_patch = np.zeros(n2, bool)
+        m_patch[n2 - len(caps2):] = True
+        for _ in range(FACE['patch_grow']):
+            m_patch |= (A @ m_patch.astype(float) > 0) & region
+        e_free, e_fixed = np.where(m_patch)[0], np.where(~m_patch)[0]
+        masks['ball'] = np.max([np.exp(-(((x - cen[k, 0]) / FACE['ball_rx']) ** 2 + ((y - cen[k, 1] + FACE['ball_dn']) / FACE['ball_ry']) ** 2)) for k in eyes], axis=0) * region
         topo = dict(loops=loops, T2=T2, A=A, deg=deg, free=free, fixed=fixed, Mfc=M[free][:, fixed],
                     solve=spla.factorized(M[free][:, free].tocsc()), region=region, w=w, band=band,
-                    used=used, remap=remap, masks=masks, caps=caps, interior=interior)
+                    used=used, remap=remap, masks=masks, caps=caps, interior=interior, loops2=loops2, caps2=caps2,
+                    e_free=e_free, e_fixed=e_fixed, e_Mfc=M[e_free][:, e_fixed], e_solve=spla.factorized(M[e_free][:, e_free].tocsc()),
+                    e_Lfc=Lu[e_free][:, e_fixed], e_lsolve=spla.factorized(Lu[e_free][:, e_free].tocsc()))
         print(f'mannequin face: removed {interior.sum()} cavity verts, capped {len(loops)} openings, faired {len(free)} verts')
     t = topo
-    P2 = np.vstack([P, cap_points(P, t['loops'], t['caps'])])
+    P2 = cap_all(P, t['loops'], t['caps'], t['loops2'], t['caps2'])
     W2 = np.vstack([Wu] + [Wu[t['loops'][li]].mean(0)[None] for li, _, _ in t['caps']])
+    W2 = np.vstack([W2] + [W2[t['loops2'][li]].mean(0)[None] for li, _, _ in t['caps2']])
     F = P2.copy()
     for c in range(3):
         F[t['free'], c] = t['solve'](-t['Mfc'] @ P2[t['fixed'], c])
@@ -454,16 +543,37 @@ def _faceless(P, tris, Wu, topo=None, interior=None):
     for name, its, gain in (('mouth', FACE['mouth_its'], 1.0), ('eye', FACE['eye_its'], FACE['eye_gain']), ('nose', FACE['nose_its'], FACE['nose_gain'])):
         D = D + mk[name][:, None] * (gain * soften(D0, its) - D)
     Q = F + FACE['dscale'] * D
-    relax = np.clip(mk['eye'] * 2, 0, 1)[:, None] * 0.5
-    for _ in range(FACE['eye_relax']):  # untangle the closed lids
-        Q += relax * ((t['A'] @ Q) / t['deg'][:, None] - Q)
-    Q -= (FACE['sock_depth'] * mk['sock'] - FACE['bulge'] * mk['ball'])[:, None] * vertex_normals(Q, t['T2'])  # sockets under the brow, round lids
+    if FACE['patch_rx'] > 0:  # eyes: drop the lids, fair the patch, add a smooth closed-eye mound
+        for c in range(3):
+            Q[t['e_free'], c] = t['e_solve'](-t['e_Mfc'] @ Q[t['e_fixed'], c])
+        back = np.array([0.0, -0.1, 1.0]) / np.hypot(0.1, 1.0)
+        Q -= (FACE['sock_depth'] * mk['sock'] - FACE['bulge'] * mk['ball'])[:, None] * back[None]
+    else:
+        relax = np.clip(mk['eye'] * 2, 0, 1)[:, None] * 0.5
+        for _ in range(FACE['eye_relax']):  # untangle the closed lids
+            Q += relax * ((t['A'] @ Q) / t['deg'][:, None] - Q)
+        Q -= (FACE['sock_depth'] * mk['sock'] - FACE['bulge'] * mk['ball'])[:, None] * vertex_normals(Q, t['T2'])  # sockets under the brow, round lids
     tw = (t['region'] * 0.5)[:, None]
     for _ in range(FACE['tangent_its']):  # spread vertices the fairing bunched up, without changing the shape
         Nq = vertex_normals(Q, t['T2'])
         lap = (t['A'] @ Q) / t['deg'][:, None] - Q
         Q += tw * (lap - (lap * Nq).sum(1, keepdims=True) * Nq)
     P2 = P2 + t['w'][:, None] * (Q - P2)
+    # untangle any folded triangles (closed lids, mouth corners): smooth them and their neighbours until none are left
+    for _ in range(60):
+        fn = np.cross(P2[t['T2'][:, 1]] - P2[t['T2'][:, 0]], P2[t['T2'][:, 2]] - P2[t['T2'][:, 0]])
+        fn /= np.linalg.norm(fn, axis=1, keepdims=True) + 1e-15
+        Nv = vertex_normals(P2, t['T2'])
+        bad_t = ((fn[:, None, :] * Nv[t['T2']]).sum(2) < 0.2).any(1) & t['region'][t['T2']].all(1)
+        if not bad_t.any():
+            break
+        m_ = np.zeros(len(P2))
+        m_[np.unique(t['T2'][bad_t])] = 1
+        for _ in range(2):
+            m_ = np.maximum(m_, (t['A'] @ m_ > 0).astype(float))
+        m_ *= t['region']
+        for _ in range(4):
+            P2 += 0.5 * m_[:, None] * ((t['A'] @ P2) / t['deg'][:, None] - P2)
     for _ in range(3):  # melt the seam where the faired patch meets the head
         avg = (t['A'] @ P2) / t['deg'][:, None]
         P2[t['band']] += 0.5 * (avg[t['band']] - P2[t['band']])
