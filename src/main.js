@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Poser, EFFECTOR_NAMES } from './poser.js';
 import { buildProxies } from './proxies.js';
-import { createHumanRig, buildHuman, transferPose, MODELS, MODEL_NAMES } from './human.js';
+import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, HEIGHT_RANGE_CM, MODELS, MODEL_NAMES } from './human.js';
 import { Skirt } from './cloth.js';
 import { STRINGS, detectLang } from './i18n.js';
 
@@ -58,6 +58,8 @@ scene.add(grid);
 
 // ---------- figure ----------
 let modelName = 'male';
+const shapeValues = Object.fromEntries(MODEL_NAMES.map((n) => [n, { ...MODELS[n].shapeBase }]));
+let bodyHeight = 0;
 let rig;
 let meshes; // invisible touch targets
 let poser;
@@ -75,8 +77,9 @@ function disposeTree(obj) {
 // Build (or swap to) a body model. When swapping, the current pose and pins carry over.
 function loadModel(name) {
   const old = rig ? { rig, poser } : null;
-  const next = createHumanRig(MODELS[name]);
-  buildHuman(next, MODELS[name]); // what you see (also sets the standing rest pose)
+  const shaped = shapeBody(MODELS[name], shapeValues[name]);
+  const next = createHumanRig(MODELS[name], shaped);
+  bodyHeight = buildHuman(next, MODELS[name], shaped).height; // what you see (also sets the standing rest pose)
   const nextPoser = new Poser(next);
   if (old) {
     transferPose(old.rig, next);
@@ -377,14 +380,11 @@ const actions = {
     btn('skirt').classList.toggle('on', skirtOn);
   },
   snap: snapshot,
-  model() {
-    if (drag) return;
-    const next = MODEL_NAMES[(MODEL_NAMES.indexOf(modelName) + 1) % MODEL_NAMES.length];
-    loadModel(next);
-    undoStack.length = 0; // saved poses belong to the previous body
-    redoStack.length = 0;
-    refreshButtons();
-    document.getElementById('modelName').textContent = STRINGS[lang].models[modelName];
+  body() {
+    const panel = document.getElementById('bodyPanel');
+    panel.hidden = !panel.hidden;
+    btn('body').classList.toggle('on', !panel.hidden);
+    if (!panel.hidden) refreshBodyPanel();
   },
 };
 document.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => actions[b.dataset.act]()));
@@ -398,6 +398,64 @@ window.addEventListener('keydown', (e) => {
     else undo();
   }
 });
+
+// ---------- body panel: model + shape sliders ----------
+const SHAPE_KEYS = ['height', 'weight', 'muscle'];
+let rebuildQueued = false;
+
+function switchModel(name) {
+  if (drag || name === modelName) return;
+  loadModel(name);
+  undoStack.length = 0; // saved poses belong to the previous body
+  redoStack.length = 0;
+  refreshButtons();
+  refreshBodyPanel();
+}
+
+function refreshBodyPanel() {
+  const s = STRINGS[lang];
+  document.getElementById('modelName').textContent = s.models[modelName];
+  document.querySelectorAll('[data-model]').forEach((b) => {
+    b.textContent = s.models[b.dataset.model];
+    b.classList.toggle('on', b.dataset.model === modelName);
+  });
+  const vals = shapeValues[modelName];
+  const hIn = document.getElementById('shape-height');
+  const [hMin, hMax] = HEIGHT_RANGE_CM[modelName];
+  hIn.min = hMin;
+  hIn.max = hMax;
+  hIn.value = Math.round(heightOf(MODELS[modelName], vals.height) * 100);
+  document.getElementById('out-height').textContent = `${Math.round(heightOf(MODELS[modelName], vals.height) * 100)} cm`;
+  for (const k of ['weight', 'muscle']) {
+    document.getElementById(`shape-${k}`).value = Math.round(vals[k] * 100);
+    document.getElementById(`out-${k}`).textContent = `${Math.round(vals[k] * 100)}`;
+  }
+}
+
+function queueRebuild() {
+  if (rebuildQueued) return;
+  rebuildQueued = true;
+  requestAnimationFrame(() => {
+    rebuildQueued = false;
+    if (drag) return;
+    loadModel(modelName); // same body type, new shape: the pose carries over
+    refreshBodyPanel();
+  });
+}
+
+document.querySelectorAll('[data-model]').forEach((b) => b.addEventListener('click', () => switchModel(b.dataset.model)));
+for (const k of SHAPE_KEYS) {
+  document.getElementById(`shape-${k}`).addEventListener('input', (e) => {
+    const n = Number(e.target.value);
+    shapeValues[modelName][k] = k === 'height' ? heightParam(MODELS[modelName], n / 100) : n / 100;
+    queueRebuild();
+  });
+}
+document.getElementById('shapeReset').addEventListener('click', () => {
+  shapeValues[modelName] = { ...MODELS[modelName].shapeBase };
+  queueRebuild();
+});
+document.getElementById('bodyClose').addEventListener('click', () => actions.body());
 
 // ---------- timer (for speed tests) ----------
 const timerBtn = document.getElementById('timerBtn');
@@ -426,8 +484,8 @@ function applyLang() {
   document.documentElement.lang = lang;
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = s[el.dataset.i18n]; });
   document.getElementById('viewName').textContent = s.views[viewIndex];
-  document.getElementById('modelName').textContent = s.models[modelName];
   document.title = s.title;
+  refreshBodyPanel();
   langSelect.value = lang;
 }
 langSelect.addEventListener('change', () => {

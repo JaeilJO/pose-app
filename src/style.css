@@ -182,3 +182,43 @@ button.chip { cursor: pointer; }
   .lens { bottom: calc(80px + var(--safe-bottom)); }
   .lens input { width: 90px; }
 }
+
+/* body panel: model + shape sliders */
+.panel {
+  position: fixed;
+  left: 50%;
+  bottom: calc(126px + var(--safe-bottom));
+  transform: translateX(-50%);
+  width: min(340px, calc(100vw - 24px));
+  padding: 12px 14px 8px;
+  font-size: 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
+}
+.panel[hidden] { display: none; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.seg { display: inline-flex; padding: 3px; background: rgba(0, 0, 0, 0.06); border-radius: 10px; }
+.seg button {
+  min-width: 72px;
+  height: 32px;
+  padding: 0 12px;
+  font: inherit;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.seg button.on { color: var(--ink); background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); font-weight: 600; }
+.panel .icon { width: 36px; height: 36px; font-size: 15px; color: var(--muted); background: transparent; border: 0; border-radius: 10px; cursor: pointer; }
+.slider { display: grid; grid-template-columns: 64px 1fr 52px; align-items: center; gap: 8px; height: 40px; }
+.slider input { width: 100%; accent-color: var(--accent); }
+.slider output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.panel .link { display: block; margin: 2px auto 0; height: 34px; padding: 0 10px; font: inherit; font-size: 12px; color: var(--accent); background: transparent; border: 0; cursor: pointer; }
+/* wide screens: keep the panel beside the figure instead of over the legs */
+@media (min-width: 760px) {
+  .panel { left: 16px; top: 50%; bottom: auto; transform: translateY(-50%); width: 320px; }
+}

@@ -10,21 +10,92 @@ export const MODEL_NAMES = Object.keys(MODELS);
 
 const bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
-export function createHumanRig(data = male) {
-  return new Rig(boneDefsFromJoints(data.joints));
+// Decoded buffers per model (decoding base64 is the slow part, so do it once).
+const cache = new Map();
+function decoded(data) {
+  if (!cache.has(data)) {
+    const deltas = {};
+    for (const [name, ends] of Object.entries(data.shapes)) {
+      deltas[name] = {};
+      for (const [end, v] of Object.entries(ends)) deltas[name][end] = { d: new Int16Array(bytes(v.d).buffer), j: v.j };
+    }
+    const cav = bytes(data.cavity);
+    const colors = new Uint8Array(cav.length * 3);
+    for (let i = 0; i < cav.length; i++) colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = cav[i];
+    cache.set(data, {
+      base: new Float32Array(bytes(data.positions).buffer),
+      index: new Uint16Array(bytes(data.index).buffer),
+      skinIndex: bytes(data.skinIndex),
+      skinWeight: bytes(data.skinWeight),
+      colors,
+      deltas,
+    });
+  }
+  return cache.get(data);
 }
 
-export function buildHuman(rig, data = male) {
+/**
+ * Body shape from slider values (0..1 for height, weight = body fat, muscle).
+ * Each slider blends toward the shape baked at its low or high end.
+ */
+export function shapeBody(data, values = {}) {
+  const dec = decoded(data);
+  const positions = Float32Array.from(dec.base);
+  const joints = Object.fromEntries(Object.entries(data.joints).map(([k, v]) => [k, [...v]]));
+  for (const [name, b] of Object.entries(data.shapeBase)) {
+    const v = values[name] ?? b;
+    let end = null;
+    let w = 0;
+    if (v < b - 1e-4) { end = 'lo'; w = (b - v) / b; }
+    else if (v > b + 1e-4) { end = 'hi'; w = (v - b) / (1 - b); }
+    const delta = end && dec.deltas[name][end];
+    if (!delta) continue;
+    const s = w * data.deltaScale;
+    for (let i = 0; i < positions.length; i++) positions[i] += delta.d[i] * s;
+    for (const k in joints) for (let c = 0; c < 3; c++) joints[k][c] += delta.j[k][c] * w;
+  }
+  return { positions, joints };
+}
+
+// Standing height (m) for a height-slider value. Offsets blend linearly, so each half is a straight line.
+const heightCache = new Map();
+function heightEnds(data) {
+  if (!heightCache.has(data)) {
+    const extent = (v) => {
+      const p = shapeBody(data, { ...data.shapeBase, height: v }).positions;
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 1; i < p.length; i += 3) { if (p[i] < lo) lo = p[i]; if (p[i] > hi) hi = p[i]; }
+      return hi - lo;
+    };
+    heightCache.set(data, { lo: extent(0), mid: extent(data.shapeBase.height), hi: extent(1) });
+  }
+  return heightCache.get(data);
+}
+export function heightOf(data, v) {
+  const e = heightEnds(data), b = data.shapeBase.height;
+  return v <= b ? e.lo + (e.mid - e.lo) * (v / b) : e.mid + (e.hi - e.mid) * ((v - b) / (1 - b));
+}
+export function heightParam(data, meters) {
+  const e = heightEnds(data), b = data.shapeBase.height;
+  const v = meters <= e.mid ? b * (meters - e.lo) / (e.mid - e.lo) : b + (1 - b) * (meters - e.mid) / (e.hi - e.mid);
+  return Math.min(1, Math.max(0, v));
+}
+// Realistic range for the slider (MakeHuman's own extremes reach 1.3–2.4 m).
+export const HEIGHT_RANGE_CM = { male: [150, 205], female: [140, 195] };
+
+export function createHumanRig(data = male, shaped = shapeBody(data)) {
+  return new Rig(boneDefsFromJoints(shaped.joints));
+}
+
+export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
+  const dec = decoded(data);
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(bytes(data.positions).buffer), 3));
-  g.setIndex(new THREE.BufferAttribute(new Uint16Array(bytes(data.index).buffer), 1));
-  g.setAttribute('skinIndex', new THREE.BufferAttribute(bytes(data.skinIndex), 4));
-  g.setAttribute('skinWeight', new THREE.BufferAttribute(bytes(data.skinWeight), 4, true));
+  g.setAttribute('position', new THREE.BufferAttribute(shaped.positions, 3));
+  g.setIndex(new THREE.BufferAttribute(dec.index, 1));
+  g.setAttribute('skinIndex', new THREE.BufferAttribute(dec.skinIndex, 4));
+  g.setAttribute('skinWeight', new THREE.BufferAttribute(dec.skinWeight, 4, true));
   // Grooves between muscles are pre-darkened (cavity map baked in tools/build_human.py).
-  const cav = bytes(data.cavity);
-  const colors = new Uint8Array(cav.length * 3);
-  for (let i = 0; i < cav.length; i++) colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = cav[i];
-  g.setAttribute('color', new THREE.BufferAttribute(colors, 3, true));
+  g.setAttribute('color', new THREE.BufferAttribute(dec.colors, 3, true));
   g.computeVertexNormals();
 
   const material = new THREE.MeshPhysicalMaterial({
@@ -57,7 +128,8 @@ export function buildHuman(rig, data = male) {
   rig.captureRest();
 
   const outline = addOutline(mesh, []);
-  return { mesh, material, outline };
+  mesh.computeBoundingBox();
+  return { mesh, material, outline, height: mesh.boundingBox.max.y };
 }
 
 function standingPose(rig) {

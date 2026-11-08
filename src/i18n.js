@@ -9,7 +9,8 @@ export const STRINGS = {
     saveHint: 'Long-press or right-click the image to save it.',
     close: 'Close',
     views: ['3/4', 'Front', 'Side', 'Back'],
-    model: 'Model', models: { male: 'Male', female: 'Female' },
+    body: 'Body', models: { male: 'Male', female: 'Female' },
+    height: 'Height', fat: 'Body fat', muscle: 'Muscle', resetShape: 'Reset body',
   },
   es: {
     title: 'Prototipo de poses',
@@ -21,7 +22,8 @@ export const STRINGS = {
     saveHint: 'Mantén pulsada la imagen o haz clic derecho para guardarla.',
     close: 'Cerrar',
     views: ['3/4', 'Frente', 'Lado', 'Espalda'],
-    model: 'Modelo', models: { male: 'Hombre', female: 'Mujer' },
+    body: 'Cuerpo', models: { male: 'Hombre', female: 'Mujer' },
+    height: 'Altura', fat: 'Grasa', muscle: 'Músculo', resetShape: 'Restablecer cuerpo',
   },
   pt: {
     title: 'Protótipo de poses',
@@ -33,7 +35,8 @@ export const STRINGS = {
     saveHint: 'Toque e segure a imagem ou clique com o botão direito para salvar.',
     close: 'Fechar',
     views: ['3/4', 'Frente', 'Lado', 'Costas'],
-    model: 'Modelo', models: { male: 'Homem', female: 'Mulher' },
+    body: 'Corpo', models: { male: 'Homem', female: 'Mulher' },
+    height: 'Altura', fat: 'Gordura', muscle: 'Músculo', resetShape: 'Redefinir corpo',
   },
   ko: {
     title: '포즈 프로토타입',
@@ -45,7 +48,8 @@ export const STRINGS = {
     saveHint: '이미지를 길게 누르거나 우클릭해서 저장하세요.',
     close: '닫기',
     views: ['3/4', '정면', '측면', '뒤'],
-    model: '모델', models: { male: '남성', female: '여성' },
+    body: '체형', models: { male: '남성', female: '여성' },
+    height: '키', fat: '체지방', muscle: '근육', resetShape: '체형 초기화',
   },
 };
 

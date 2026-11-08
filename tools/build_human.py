@@ -56,17 +56,15 @@ for line in open(f'{MH}/3dobjs/base.obj'):
         cur = line.split()[1]
     elif line.startswith('f '):
         faces.append((cur, [int(p.split('/')[0]) - 1 for p in line.split()[1:]]))
-V = np.array(verts)
+V_BASE = np.array(verts)
+TARGETS = {}
 
 
-def apply_target(path, w):
-    if w <= 0:
-        return
-    rows = [l.split() for l in open(f'{MH}/targets/{path}') if l.strip() and not l.startswith('#')]
-    if not rows:
-        return
-    t = np.atleast_2d(np.array(rows, dtype=float))
-    V[t[:, 0].astype(int)] += w * t[:, 1:4]
+def target(path):
+    if path not in TARGETS:
+        rows = [l.split() for l in open(f'{MH}/targets/{path}') if l.strip() and not l.startswith('#')]
+        TARGETS[path] = np.atleast_2d(np.array(rows, dtype=float)) if rows else None
+    return TARGETS[path]
 
 
 def split(v):
@@ -76,33 +74,58 @@ def split(v):
     return {'min': (0.5 - v) * 2, 'average': v * 2}
 
 
-genders = {'male': GENDER, 'female': 1 - GENDER}
-muscles, weights = split(MUSCLE), split(WEIGHT)
-for g, gw in genders.items():
-    for m, mw in muscles.items():
-        for wt, ww in weights.items():
-            apply_target(f'macrodetails/universal-{g}-young-{m}muscle-{wt}weight.target', gw * mw * ww)
-            apply_target(f'macrodetails/proportions/{g}-young-{m}muscle-{wt}weight-idealproportions.target', gw * mw * ww * PROPORTIONS)
-    for race, rw in RACES.items():
-        apply_target(f'macrodetails/{race}-{g}-young.target', gw * rw)
-for path, w in DETAIL.items():
-    apply_target(path, w)
+def shape(gender, muscle, weight, height, proportions, detail, base_muscle):
+    """Base mesh + MakeHuman macro targets (+ extra muscle detail scaled with the muscle slider)."""
+    V = V_BASE.copy()
+
+    def apply(path, w):
+        t = target(path)
+        if w > 1e-6 and t is not None:
+            V[t[:, 0].astype(int)] += w * t[:, 1:4]
+
+    genders = {'male': gender, 'female': 1 - gender}
+    for g, gw in genders.items():
+        for m, mw in split(muscle).items():
+            for wt, ww in split(weight).items():
+                w = gw * mw * ww
+                apply(f'macrodetails/universal-{g}-young-{m}muscle-{wt}weight.target', w)
+                apply(f'macrodetails/proportions/{g}-young-{m}muscle-{wt}weight-idealproportions.target', w * proportions)
+                for h, hw_ in split(height).items():
+                    if h != 'average':
+                        apply(f'macrodetails/height/{g}-young-{m}muscle-{wt}weight-{h}height.target', w * hw_)
+        for race, rw in RACES.items():
+            apply(f'macrodetails/{race}-{g}-young.target', gw * rw)
+    k = np.clip(muscle / base_muscle, 0, 1.6)
+    for path, w in detail.items():
+        apply(path, w * k)
+    return V
+
+
+BASE = dict(gender=GENDER, muscle=MUSCLE, weight=WEIGHT, height=0.5, proportions=PROPORTIONS)
+V = shape(**BASE, detail=DETAIL, base_muscle=MUSCLE)
 
 # ---------------- joints ----------------
 skel = json.load(open(f'{MH}/rigs/default.mhskel'))
-joint = lambda name: V[skel['joints'][name]].mean(0)
-head_of = lambda bone: joint(skel['bones'][bone]['head'])
-J = {
-    'hips': head_of('spine05'), 'spine': head_of('spine03'), 'chest': head_of('spine01'),
-    'neck': head_of('neck01'), 'head': head_of('head'),
-}
-for s, S in (('L', 'L'), ('R', 'R')):
-    J[f'shoulder.{s}'] = head_of(f'upperarm01.{S}')
-    J[f'elbow.{s}'] = head_of(f'lowerarm01.{S}')
-    J[f'wrist.{s}'] = head_of(f'wrist.{S}')
-    J[f'hip.{s}'] = head_of(f'upperleg01.{S}')
-    J[f'knee.{s}'] = head_of(f'lowerleg01.{S}')
-    J[f'ankle.{s}'] = head_of(f'foot.{S}')
+
+
+def joints_of(V):
+    joint = lambda name: V[skel['joints'][name]].mean(0)
+    head_of = lambda bone: joint(skel['bones'][bone]['head'])
+    J = {
+        'hips': head_of('spine05'), 'spine': head_of('spine03'), 'chest': head_of('spine01'),
+        'neck': head_of('neck01'), 'head': head_of('head'),
+    }
+    for side in ('L', 'R'):
+        J[f'shoulder.{side}'] = head_of(f'upperarm01.{side}')
+        J[f'elbow.{side}'] = head_of(f'lowerarm01.{side}')
+        J[f'wrist.{side}'] = head_of(f'wrist.{side}')
+        J[f'hip.{side}'] = head_of(f'upperleg01.{side}')
+        J[f'knee.{side}'] = head_of(f'lowerleg01.{side}')
+        J[f'ankle.{side}'] = head_of(f'foot.{side}')
+    return {k: v * SCALE for k, v in J.items()}
+
+
+J = joints_of(V)
 
 # ---------------- skin weights: MakeHuman bones -> our bones ----------------
 OUR = ['hips', 'spine', 'chest', 'neck', 'head',
@@ -204,7 +227,7 @@ def largest_component(tris, n):
     return tris[roots == best]
 
 
-def make_faceless(P, tris, Wu):
+def make_faceless(P, tris, Wu, topo=None):
     """Replace the head with a clean mannequin head: cut the mesh at the top of the neck,
     then loft rings from the neck edge into an egg fitted to the original cranium."""
     hw = Wu[:, IDX['head']] / Wu.sum(1)
@@ -221,52 +244,67 @@ def make_faceless(P, tris, Wu):
     rz = (band[:, 2].max() - band[:, 2].min()) / 2
 
     def egg(dirs):
+        """Skull surface along `dirs`: an egg whose lower front is squared off into a jaw."""
         u = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
         low = np.clip(-u[:, 1], 0, 1)
+        fr = np.clip(u[:, 2], 0, 1)
         ry = np.where(u[:, 1] > 0, top, rbot)
-        rzq = np.where(u[:, 2] > 0, rz * (1 + 0.13 * low), rz * (1 - 0.05 * low))  # jaw reaches forward
-        rxq = rx * (1 - 0.14 * low)  # jaw narrows a little toward the chin
-        t = 1 / np.sqrt((u[:, 0] / rxq) ** 2 + (u[:, 1] / ry) ** 2 + (u[:, 2] / rzq) ** 2)
+        rzq = np.where(u[:, 2] > 0, rz * (1 + 0.1 * low ** 2), rz * (1 - 0.05 * low ** 2))
+        rxq = rx * (1 - 0.1 * low ** 2)
+        side = np.clip(np.abs(u[:, 0]) * 1.5, 0, 1)
+        n = 2 + 2.6 * low ** 1.6 * fr ** 1.4 + 0.8 * low ** 1.6 * side ** 2  # smooth: no creases
+        t = (np.abs(u[:, 0] / rxq) ** n + np.abs(u[:, 1] / ry) ** n + np.abs(u[:, 2] / rzq) ** n) ** (-1 / n)
         return c + u * t[:, None]
 
     # 1. Cut along a tilted plane: under the jaw in front, at the skull base behind
-    #    (only around the head: shoulders and arms stay).
-    F = np.array([0.0, ychin - 0.004, cz + rz * 0.55])
-    B = np.array([0.0, cy - 0.07, cz - rz * 0.9])
-    dyz = B - F
-    nrm = np.array([0.0, -dyz[2], dyz[1]])
-    if np.dot(c - F, nrm) < 0:
-        nrm = -nrm
-    near_head = (np.abs(P[:, 0]) < rx * 1.8) & (np.abs(P[:, 2] - cz) < rz * 2.2) & (P[:, 1] > ychin - 0.06)
-    cut = near_head & (((P - F) @ nrm > 0) | (hw > 0.85))  # everything above the plane + the old jaw
-    kept = tris[~cut[tris].any(1)]
-    kept = largest_component(kept, len(P))
-    loops = sorted(boundary_loops(kept), key=len, reverse=True)
-    neck = np.array(loops[0])
+    #    (only around the head: shoulders and arms stay). Shape variants reuse the cut.
+    if topo is None:
+        F = np.array([0.0, ychin - 0.004, cz + rz * 0.55])
+        B = np.array([0.0, cy - 0.07, cz - rz * 0.9])
+        dyz = B - F
+        nrm = np.array([0.0, -dyz[2], dyz[1]])
+        if np.dot(c - F, nrm) < 0:
+            nrm = -nrm
+        near_head = (np.abs(P[:, 0]) < rx * 1.8) & (np.abs(P[:, 2] - cz) < rz * 2.2) & (P[:, 1] > ychin - 0.06)
+        cut = near_head & (((P - F) @ nrm > 0) | (hw > 0.85))  # everything above the plane + the old jaw
+        kept = tris[~cut[tris].any(1)]
+        kept = largest_component(kept, len(P))
+        loops = sorted(boundary_loops(kept), key=len, reverse=True)
+        neck = np.array(loops[0])
+    else:
+        kept, neck = topo['kept'], topo['neck']
     nc = P[neck].mean(0)
 
-    # 2. Loft: rings flow from the neck edge onto the egg, from jaw/skull base up to the crown.
-    K = 20
+    # 2. Loft. For every direction around the neck the profile is:
+    #    neck edge -> straight under-jaw plane -> jaw line (a soft corner) -> up the skull.
+    #    In front the jaw line is low and well forward of the throat; toward the back it
+    #    rises to the skull base and the corner fades out.
     theta = np.arctan2(P[neck, 0] - nc[0], P[neck, 2] - nc[2])  # 0 = front
     back = (1 - np.cos(theta)) / 2  # 0 front .. 1 back
-    phi0 = np.radians(-62 + 22 * back)  # chin is low, skull base is high
-    new_pos, new_w, rings = [], [], [neck]
+    dirs_at = lambda ph: np.stack([np.sin(theta) * np.cos(ph), np.sin(ph), np.cos(theta) * np.cos(ph)], 1)
+    phi_j = np.radians(-46 + 20 * back)
+    jaw = egg(dirs_at(phi_j))
+    K_UNDER, K_EGG = 4, 18
+    new_pos, new_w, rings, ring_back = [], [], [neck], [back]
     n0 = len(P)
     neck_w = Wu[neck] / Wu[neck].sum(1, keepdims=True)
-    for k in range(1, K):
-        f = k / K
-        phi = phi0 + (np.pi / 2 - phi0) * f ** 1.15
-        dirs = np.stack([np.sin(theta) * np.cos(phi), np.sin(phi), np.cos(theta) * np.cos(phi)], 1)
-        on_egg = egg(dirs)
-        b = np.clip(f / 0.16, 0, 1)
-        b = b * b * (3 - 2 * b)
-        pts = P[neck] * (1 - b) + on_egg * b
+    head_w = np.zeros_like(neck_w)
+    head_w[:, IDX['head']] = 1
+
+    def add_ring(pts, w):
         idx = np.arange(len(pts)) + n0 + len(new_pos)
         new_pos.extend(pts)
-        wh = np.zeros_like(neck_w)
-        wh[:, IDX['head']] = 1
-        new_w.extend(neck_w * (1 - b) + wh * b)
+        new_w.extend(w)
         rings.append(idx)
+        ring_back.append(back)
+
+    for k in range(1, K_UNDER + 1):
+        f = k / K_UNDER
+        b = f * f * (3 - 2 * f)
+        add_ring(P[neck] * (1 - f) + jaw * f, neck_w * (1 - b) + head_w * b)
+    for k in range(1, K_EGG):
+        g = k / K_EGG
+        add_ring(egg(dirs_at(phi_j + (np.pi / 2 - phi_j) * g)), head_w)
     apex = n0 + len(new_pos)
     new_pos.append(c + np.array([0, top, 0]))
     w_apex = np.zeros(Wu.shape[1]); w_apex[IDX['head']] = 1
@@ -274,7 +312,7 @@ def make_faceless(P, tris, Wu):
 
     new_tris = []
     m = len(neck)
-    for k in range(K - 1):
+    for k in range(len(rings) - 1):
         r0, r1 = rings[k], rings[k + 1]
         for j in range(m):
             j1 = (j + 1) % m
@@ -288,28 +326,29 @@ def make_faceless(P, tris, Wu):
     Wu = np.vstack([Wu, np.array(new_w)])
     tris = np.vstack([kept, np.array(new_tris)])
 
-    # 3. Smooth the neck-to-head transition (first rings only).
+    # 3. Round the corners: barely at the jaw line in front, fully at the back of the neck.
     n = len(P)
     e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
     e = np.unique(np.sort(e, axis=1), axis=0)
     A = sp.coo_matrix((np.ones(len(e) * 2), (np.r_[e[:, 0], e[:, 1]], np.r_[e[:, 1], e[:, 0]])), shape=(n, n)).tocsr()
     deg = np.asarray(A.sum(1)).ravel()
-    # Include the neck edge and two rows of the original neck below it.
-    soft_mask = np.zeros(n, dtype=bool)
-    soft_mask[np.concatenate([r for r in rings[0:3]])] = True
-    original = np.arange(n) < n0
-    for _ in range(1):  # grow downward into the old neck only
-        soft_mask |= (np.asarray(A[:, np.flatnonzero(soft_mask)].sum(1)).ravel() > 0) & original
-    soft = np.flatnonzero(soft_mask)
+    amount = np.zeros(n)
+    for k in range(0, K_UNDER + 3):
+        amount[rings[k]] = 0.12 + 0.6 * ring_back[k]
+    below = (np.asarray(A[:, neck].sum(1)).ravel() > 0) & (np.arange(n) < n0)
+    amount[below] = 0.35
     for _ in range(4):
         avg = (A @ P) / np.maximum(deg, 1)[:, None]
-        P[soft] = P[soft] * 0.5 + avg[soft] * 0.5
+        P = P + amount[:, None] * (avg - P)
 
-    used = np.unique(tris)
-    remap = -np.ones(n, dtype=np.int64)
-    remap[used] = np.arange(len(used))
-    print(f'faceless: neck loop {m} verts, new head {len(new_pos)} verts, open loops left: {len(boundary_loops(tris))}')
-    return P[used], remap[tris], Wu[used]
+    if topo is None:
+        used = np.unique(tris)
+        remap = -np.ones(n, dtype=np.int64)
+        remap[used] = np.arange(len(used))
+        topo = dict(kept=kept, neck=neck, used=used, remap=remap)
+        print(f'faceless: neck loop {m} verts, new head {len(new_pos)} verts, open loops left: {len(boundary_loops(tris))}')
+    used, remap = topo['used'], topo['remap']
+    return P[used], remap[tris], Wu[used], topo
 
 
 # ---------------- keep body + eyes, triangulate, compact ----------------
@@ -327,9 +366,9 @@ tris = remap[tris]
 P = V[used] * SCALE
 Wu = W[used]
 Wu[Wu.sum(1) < 1e-6, IDX['head']] = 1  # unweighted helper verts (eyeballs) ride the head
+tris_c, used_c, Wu_c = tris, used, Wu.copy()
 
-if FACELESS:
-    P, tris, Wu = make_faceless(P, tris, Wu)
+P, tris, Wu, TOPO = make_faceless(P, tris_c, Wu_c)
 
 # top-4 influences, quantized to bytes
 order = np.argsort(-Wu, axis=1)[:, :4]
@@ -399,18 +438,40 @@ cavity = 1 - 0.38 * np.clip(curv / (np.percentile(curv, 97) + 1e-9), 0, 1)
 cavity = np.round(cavity * 255).astype(np.uint8)
 
 b64 = lambda a: base64.b64encode(a.tobytes()).decode()
-joints = {k: [round(float(x) * SCALE, 5) for x in v] for k, v in J.items()}
+rnd = lambda d: {k: [round(float(x), 5) for x in v] for k, v in d.items()}
+
+# ---------------- body-shape sliders: offsets at each slider's ends ----------------
+SLIDERS = ('height', 'weight', 'muscle')
+DELTA_SCALE = 1e-4  # int16 steps of 0.1 mm
+shapes = {}
+for name in SLIDERS:
+    shapes[name] = {}
+    for end, key in ((0.0, 'lo'), (1.0, 'hi')):
+        if abs(BASE[name] - end) < 1e-6:
+            continue
+        params = dict(BASE, **{name: end})
+        Vs = shape(**params, detail=DETAIL, base_muscle=MUSCLE)
+        Ps = make_faceless(Vs[used_c] * SCALE, tris_c, Wu_c, TOPO)[0]
+        dP = np.round((Ps - P) / DELTA_SCALE)
+        assert np.abs(dP).max() < 32767
+        Js = joints_of(Vs)
+        shapes[name][key] = {'d': b64(dP.astype(np.int16)), 'j': rnd({k: Js[k] - J[k] for k in J})}
+shape_base = {name: BASE[name] for name in SLIDERS}
+
 out = (
     '// Generated by tools/build_human.py from MakeHuman CC0 data. Do not edit by hand.\n'
     'export default {\n'
     f'  name: "{PRESET}",\n'
     f'  bones: {json.dumps(OUR)},\n'
-    f'  joints: {json.dumps(joints)},\n'
+    f'  joints: {json.dumps(rnd(J))},\n'
     f'  positions: "{b64(P.astype(np.float32))}",\n'
     f'  index: "{b64(tris.astype(np.uint16).ravel())}",\n'
     f'  skinIndex: "{b64(skin_index.ravel())}",\n'
     f'  skinWeight: "{b64(skin_weight.ravel())}",\n'
     f'  cavity: "{b64(cavity)}",\n'
+    f'  shapeBase: {json.dumps(shape_base)},\n'
+    f'  deltaScale: {DELTA_SCALE},\n'
+    f'  shapes: {json.dumps(shapes)},\n'
     '};\n'
 )
 open(OUT, 'w').write(out)
