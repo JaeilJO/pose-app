@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Loop } from './subdiv.js';
+import { tailor, tailorSkirt, fabricMaterial } from './fabric.js';
 
 // Clothes cut from the body itself, so they fit every body shape:
 // - fitted pieces (pants, shorts, t-shirt, tank top) are the body surface of a region, lifted off the skin;
@@ -194,6 +195,72 @@ function largestComponent(T, n) {
 }
 
 /** Geometry and per-vertex data of a garment, in the body's bind pose. */
+// The skin with bumps smaller than about sigma (nipples, veins, the navel rim) averaged away: each point
+// moves along its normal to the area-weighted Gaussian mean height of the skin around it.
+function debump(P, T, N, sigma) {
+  const n = P.length / 3;
+  const area = new Float32Array(n);
+  for (let t = 0; t < T.length; t += 3) {
+    const a = T[t] * 3, b = T[t + 1] * 3, c = T[t + 2] * 3;
+    const u = [P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]];
+    const v = [P[c] - P[a], P[c + 1] - P[a + 1], P[c + 2] - P[a + 2]];
+    const A = Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 6;
+    area[T[t]] += A; area[T[t + 1]] += A; area[T[t + 2]] += A;
+  }
+  const R = 2.5 * sigma;
+  const key = (x, y, z) => `${Math.floor(x / R)},${Math.floor(y / R)},${Math.floor(z / R)}`;
+  const grid = new Map();
+  for (let i = 0; i < n; i++) {
+    const k = key(P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(i);
+  }
+  const out = Float32Array.from(P);
+  const s2 = 2 * sigma * sigma;
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const gx = Math.floor(P[o] / R), gy = Math.floor(P[o + 1] / R), gz = Math.floor(P[o + 2] / R);
+    let h = 0, W = 0;
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+      const cell = grid.get(`${gx + dx},${gy + dy},${gz + dz}`);
+      if (!cell) continue;
+      for (const j of cell) {
+        const q = j * 3;
+        if (N[o] * N[q] + N[o + 1] * N[q + 1] + N[o + 2] * N[q + 2] < 0.5) continue; // other side of a fold
+        const ex = P[q] - P[o], ey = P[q + 1] - P[o + 1], ez = P[q + 2] - P[o + 2];
+        const d2 = ex * ex + ey * ey + ez * ez;
+        if (d2 > R * R) continue;
+        const w = area[j] * Math.exp(-d2 / s2);
+        h += w * (ex * N[o] + ey * N[o + 1] + ez * N[o + 2]);
+        W += w;
+      }
+    }
+    if (W > 0) for (let c = 0; c < 3; c++) out[o + c] += (h / W) * N[o + c];
+  }
+  return out;
+}
+
+// Cotangent weights of the edges E of a triangle mesh (clamped at zero): a Laplacian with these weights
+// approximates the surface's mean curvature whatever the triangle sizes, so a dense patch of small triangles
+// relaxes like the rest of the cloth instead of standing out.
+function cotanWeights(P, T, E) {
+  const at = new Map();
+  for (let e = 0; e < E.length; e += 2) at.set(E[e] < E[e + 1] ? E[e] * 1e6 + E[e + 1] : E[e + 1] * 1e6 + E[e], e / 2);
+  const w = new Float32Array(E.length / 2);
+  for (let t = 0; t < T.length; t += 3) {
+    for (let k = 0; k < 3; k++) {
+      const o = T[t + k], a = T[t + ((k + 1) % 3)], b = T[t + ((k + 2) % 3)];
+      const u = [P[a * 3] - P[o * 3], P[a * 3 + 1] - P[o * 3 + 1], P[a * 3 + 2] - P[o * 3 + 2]];
+      const v = [P[b * 3] - P[o * 3], P[b * 3 + 1] - P[o * 3 + 1], P[b * 3 + 2] - P[o * 3 + 2]];
+      const dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+      const cr = Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]);
+      w[at.get(a < b ? a * 1e6 + b : b * 1e6 + a)] += (0.5 * dot) / Math.max(cr, 1e-12);
+    }
+  }
+  for (let e = 0; e < w.length; e++) w[e] = Math.max(w[e], 0.02);
+  return w;
+}
+
 export function cutGarment(kind, body) {
   const def = GARMENTS[kind];
   const { P, T, joints: J, bones, skinIndex, skinWeight, soft } = body;
@@ -261,8 +328,38 @@ export function cutGarment(kind, body) {
   const m = src.length;
   const ring = borderRings(idx, m, 3);
   const bnb = borderNeighbours(idx, m);
-  // lift off the skin: snug at the waistband and cuffs, looser elsewhere; then smooth away body detail
-  const NB = vertexNormals(P, T);
+  const E = edgesOf(idx);
+  const deg = new Float32Array(m);
+  for (let e = 0; e < E.length; e++) deg[E[e]]++;
+  // the ease is measured from a smoothed body, so small bumps (nipples, veins, muscle edges) never print through.
+  // Smoothing moves points only along a smoothed normal field, so every point stays over its own patch of skin.
+  const P0 = new Float32Array(m * 3);
+  for (let i = 0; i < m; i++) for (let c = 0; c < 3; c++) P0[i * 3 + c] = P[src[i] * 3 + c];
+  let NS = vertexNormals(P0, idx);
+  for (let it = 0; it < 8; it++) { // smooth the normal field
+    const acc = new Float32Array(m * 3);
+    for (let e = 0; e < E.length; e += 2) {
+      const a = E[e] * 3, b = E[e + 1] * 3;
+      for (let c = 0; c < 3; c++) { acc[a + c] += NS[b + c]; acc[b + c] += NS[a + c]; }
+    }
+    for (let i = 0; i < m; i++) {
+      const o = i * 3;
+      for (let c = 0; c < 3; c++) NS[o + c] += 0.5 * (acc[o + c] / deg[i] - NS[o + c]);
+      const l = Math.hypot(NS[o], NS[o + 1], NS[o + 2]) || 1;
+      NS[o] /= l; NS[o + 1] /= l; NS[o + 2] /= l;
+    }
+  }
+  // PS: the body with its hollows filled (smoothed over a few centimetres), PR: the body without small sharp
+  // bumps. Mesh (uniform) smoothing would keep a bump made of a dense cluster of tiny triangles (the nipples
+  // are) and even grow one, so both average over skin by distance, weighted by area: size counts, not vertices.
+  const PR = debump(P0, idx, NS, 0.01);
+  const PS = debump(P0, idx, NS, 0.025);
+  // and the cloth moves along the normals of that smooth surface (a dense patch keeps its own fan of normals
+  // through mesh smoothing, which would push its points sideways)
+  NS = vertexNormals(PS, idx);
+  const NB = new Float32Array(P.length);
+  for (let i = 0; i < m; i++) for (let c = 0; c < 3; c++) NB[src[i] * 3 + c] = NS[i * 3 + c];
+  // lift off the skin: snug at the waistband and cuffs, looser elsewhere
   const X = new Float32Array(m * 3);
   const lift = new Float32Array(m);
   const hemY = J.chest[1] - 0.05;
@@ -271,11 +368,8 @@ export function cutGarment(kind, body) {
     // only the waistband and the neckline hug the body; hems and cuffs stand off it a little
     const snug = ring[i] <= 1 && (def.slot === 'top' ? yy > hemY + 0.15 : yy > J.hips[1]);
     lift[i] = snug ? 0.008 : def.ease + (def.slot === 'bottom' && ring[i] <= 1 ? 0.004 : 0);
-    for (let c = 0; c < 3; c++) X[i * 3 + c] = P[src[i] * 3 + c] + NB[src[i] * 3 + c] * lift[i];
+    for (let c = 0; c < 3; c++) X[i * 3 + c] = PR[i * 3 + c] + NS[i * 3 + c] * lift[i];
   }
-  const E = edgesOf(idx);
-  const deg = new Float32Array(m);
-  for (let e = 0; e < E.length; e++) deg[E[e]]++;
   for (let it = 0; it < 12; it++) { // straighten the cut edges (waistband, cuffs, neckline)
     const Y = Float32Array.from(X);
     for (let i = 0; i < m; i++) {
@@ -290,24 +384,33 @@ export function cutGarment(kind, body) {
   // the seat. Body detail (muscle grooves) no longer shows through.
   const floor = (i) => {
     const o = src[i] * 3;
-    const h = (X[i * 3] - P[o]) * NB[o] + (X[i * 3 + 1] - P[o + 1]) * NB[o + 1] + (X[i * 3 + 2] - P[o + 2]) * NB[o + 2];
-    if (h < lift[i]) for (let c = 0; c < 3; c++) X[i * 3 + c] += (lift[i] - h) * NB[o + c];
+    const hs = (X[i * 3] - PS[i * 3]) * NB[o] + (X[i * 3 + 1] - PS[i * 3 + 1]) * NB[o + 1] + (X[i * 3 + 2] - PS[i * 3 + 2]) * NB[o + 2];
+    const hp = (X[i * 3] - PR[i * 3]) * NB[o] + (X[i * 3 + 1] - PR[i * 3 + 1]) * NB[o + 1] + (X[i * 3 + 2] - PR[i * 3 + 2]) * NB[o + 2];
+    const need = Math.max(lift[i] - hs, Math.min(0.007, lift[i]) - hp);
+    if (need > 0) for (let c = 0; c < 3; c++) X[i * 3 + c] += need * NB[o + c];
   };
+  const W = cotanWeights(P0, idx, E);
+  const wsum = new Float32Array(m);
+  for (let e = 0; e < E.length; e += 2) { wsum[E[e]] += W[e / 2]; wsum[E[e + 1]] += W[e / 2]; }
   const tension = (its) => {
     for (let it = 0; it < its; it++) {
       const acc = new Float32Array(m * 3);
       for (let e = 0; e < E.length; e += 2) {
-        const a = E[e] * 3, b = E[e + 1] * 3;
-        for (let c = 0; c < 3; c++) { acc[a + c] += X[b + c]; acc[b + c] += X[a + c]; }
+        const a = E[e] * 3, b = E[e + 1] * 3, w = W[e / 2];
+        for (let c = 0; c < 3; c++) { acc[a + c] += w * X[b + c]; acc[b + c] += w * X[a + c]; }
       }
       for (let i = 0; i < m; i++) {
         if (ring[i] === 0) continue;
-        for (let c = 0; c < 3; c++) X[i * 3 + c] += 0.5 * (acc[i * 3 + c] / deg[i] - X[i * 3 + c]);
+        // move only along the (smoothed) normal: no tangential drift, so each point stays over its patch of skin
+        const o = i * 3;
+        const d = (acc[o] / wsum[i] - X[o]) * NS[o] + (acc[o + 1] / wsum[i] - X[o + 1]) * NS[o + 1] + (acc[o + 2] / wsum[i] - X[o + 2]) * NS[o + 2];
+        for (let c = 0; c < 3; c++) X[o + c] += 0.5 * d * NS[o + c];
         floor(i);
       }
     }
   };
-  tension(50);
+  for (let i = 0; i < m; i++) floor(i); // openings too
+  tension(150);
   if (def.drape) hang(X, src, m, def, J, P, dom, B, ring);
   tension(4);
   if (def.hem) { looseLegs(X, src, m, def, J, P, E, deg, ring); tension(3); }
@@ -340,11 +443,23 @@ export function cutGarment(kind, body) {
     for (let i = 0; i < nf; i++) if (fr[i] <= 3 && fine.X[i * 3 + 1] < hemY) pull[i] = [0.06, 0.03, 0.015, 0.01][fr[i]];
   }
   // body triangles hidden under the garment (not too near its openings, where you can look in)
+  // (measured in centimetres from the openings, not in mesh rings: the body mesh is coarse in places)
+  const fromEdge = new Float32Array(m).fill(1);
+  for (let i = 0; i < m; i++) if (ring[i] === 0) fromEdge[i] = 0;
+  for (let it = 0; it < 30; it++) {
+    for (let e = 0; e < E.length; e += 2) {
+      const a = E[e], b = E[e + 1];
+      const l = Math.hypot(X[a * 3] - X[b * 3], X[a * 3 + 1] - X[b * 3 + 1], X[a * 3 + 2] - X[b * 3 + 2]);
+      if (fromEdge[a] + l < fromEdge[b]) fromEdge[b] = fromEdge[a] + l;
+      if (fromEdge[b] + l < fromEdge[a]) fromEdge[a] = fromEdge[b] + l;
+    }
+  }
   const inner = new Set();
-  for (let i = 0; i < m; i++) if (ring[i] >= 3) inner.add(src[i]);
+  for (let i = 0; i < m; i++) if (fromEdge[i] > 0.025) inner.add(src[i]);
   const hidden = new Uint8Array(T.length / 3);
   for (let t = 0; t < T.length; t += 3) if (inner.has(T[t]) && inner.has(T[t + 1]) && inner.has(T[t + 2])) hidden[t / 3] = 1;
-  return { kind, def, ...fine, pull, ceil, gravity: CFG.gravity, hidden };
+  const { seam, h0 } = tailor(kind, def, fine.X, fine.index, fine.skinIndex, fine.skinWeight, bones, J);
+  return { kind, def, ...fine, pull, ceil, gravity: CFG.gravity, hidden, seam, h0 };
 }
 
 // A top falls from the widest part of the chest (bust, pecs, shoulder blades) instead of following the
@@ -482,7 +597,8 @@ function skirt(def, body, dom, waistY) {
   const hidden = new Uint8Array(T.length / 3);
   const under = (i) => ids.has(dom[i]) && P[i * 3 + 1] < waistY - 0.03 && P[i * 3 + 1] > crotchY + 0.03;
   for (let t = 0; t < T.length; t += 3) if (under(T[t]) && under(T[t + 1]) && under(T[t + 2])) hidden[t / 3] = 1;
-  return { kind: 'skirt', def, X, index: Uint32Array.from(idx), skinIndex: sIdx, skinWeight: sW, soft: new Uint8Array(N * 3), pull, gravity: 1, hidden, minRad, axis: [cx, cz] };
+  const { seam, h0 } = tailorSkirt(X, R, M, [cx, cz]);
+  return { kind: 'skirt', def, X, index: Uint32Array.from(idx), skinIndex: sIdx, skinWeight: sW, soft: new Uint8Array(N * 3), pull, gravity: 1, hidden, minRad, axis: [cx, cz], seam, h0 };
 }
 
 export class Garment {
@@ -518,12 +634,19 @@ export class Garment {
     if (this.kind === 'skirt') this.addSkirtBends();
     this.loop = new Loop(this.index, n);
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(this.loop.count * 3), 3));
+    const count = this.loop.count;
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(count * 3), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(count * 3).fill(1), 3));
+    g.setAttribute('restPos', new THREE.BufferAttribute(this.loop.positions(this.X), 3));
+    g.setAttribute('seamInfo', new THREE.BufferAttribute(this.loop.linear(this.seam, 2), 2));
     g.setIndex(new THREE.BufferAttribute(this.loop.index, 1));
-    this.mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: this.def.color, roughness: 0.88, metalness: 0, side: THREE.DoubleSide }));
+    this.material = fabricMaterial(this.def.color);
+    this.mesh = new THREE.Mesh(g, this.material);
     this.mesh.castShadow = true;
     this.mesh.receiveShadow = true;
     this.mesh.frustumCulled = false;
+    this.dispEdges = edgesOf(this.loop.index);
+    this.buildHemStrip(g);
     this.awake = 0;
     this.ready = false;
   }
@@ -646,13 +769,13 @@ export class Garment {
   relaxFolds(iterations) {
     const n = this.n, h = this.h, T = this.target, N = this.targetN, E = this.edges, L = this.rest;
     const ne = this.bendStart ?? L.length;
-    const ceil = this.ceil, pull = this.pull, seed = this.seed;
+    const ceil = this.ceil, pull = this.pull, seed = this.seed, h0 = this.h0;
     const acc = this._acc || (this._acc = new Float32Array(n));
     for (let it = 0; it < iterations; it++) {
       for (let e = 0; e < ne; e++) {
         const a = E[e * 2], b = E[e * 2 + 1];
         const oa = a * 3, ob = b * 3;
-        const ha = h[a] + seed[a], hb = h[b] + seed[b];
+        const ha = h[a] + seed[a] + h0[a], hb = h[b] + seed[b] + h0[b];
         const dx = T[ob] + hb * N[ob] - T[oa] - ha * N[oa];
         const dy = T[ob + 1] + hb * N[ob + 1] - T[oa + 1] - ha * N[oa + 1];
         const dz = T[ob + 2] + hb * N[ob + 2] - T[oa + 2] - ha * N[oa + 2];
@@ -679,7 +802,7 @@ export class Garment {
     }
     const pos = this.pos;
     for (let i = 0; i < n; i++) {
-      const o = i * 3, hh = h[i];
+      const o = i * 3, hh = h[i] + h0[i];
       pos[o] = T[o] + hh * N[o]; pos[o + 1] = T[o + 1] + hh * N[o + 1]; pos[o + 2] = T[o + 2] + hh * N[o + 2];
     }
   }
@@ -862,15 +985,87 @@ export class Garment {
     }
   }
 
+  // Edges with thickness: a thin band turned in along every opening (hems, cuffs, neckline, waistband).
+  buildHemStrip(g) {
+    const T = this.loop.index;
+    const count = new Map();
+    for (let t = 0; t < T.length; t += 3) {
+      for (let k = 0; k < 3; k++) {
+        const a = T[t + k], b = T[t + ((k + 1) % 3)];
+        const key = a < b ? a * 1e6 + b : b * 1e6 + a;
+        count.set(key, (count.get(key) || 0) + (a < b ? 1 : 2) * 10 + 1); // remember direction
+      }
+    }
+    const edges = [];
+    for (const [key, c] of count) {
+      if (c % 10 !== 1) continue;
+      const a = Math.floor(key / 1e6), b = key % 1e6;
+      edges.push(Math.floor(c / 10) === 1 ? [a, b] : [b, a]);
+    }
+    this.hemVerts = [...new Set(edges.flat())];
+    const slot = new Map(this.hemVerts.map((v, k) => [v, k]));
+    const B = this.hemVerts.length;
+    const idx = [];
+    for (const [a, b] of edges) {
+      const ia = slot.get(a), ib = slot.get(b);
+      idx.push(ia, ib, B + ib, ia, B + ib, B + ia);
+    }
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(B * 6), 3));
+    sg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(B * 6).fill(0.82), 3));
+    const rp = g.attributes.restPos.array, sp = new Float32Array(B * 6);
+    this.hemVerts.forEach((v, k) => { for (let c = 0; c < 3; c++) { sp[k * 3 + c] = rp[v * 3 + c]; sp[(B + k) * 3 + c] = rp[v * 3 + c]; } });
+    sg.setAttribute('restPos', new THREE.BufferAttribute(sp, 3));
+    sg.setAttribute('seamInfo', new THREE.BufferAttribute(new Float32Array(B * 4).fill(0.2), 2));
+    sg.setIndex(idx);
+    this.hemStrip = new THREE.Mesh(sg, this.material);
+    this.hemStrip.castShadow = true;
+    this.hemStrip.frustumCulled = false;
+    this.mesh.add(this.hemStrip);
+  }
+
   writeGeometry() {
     const g = this.mesh.geometry;
-    g.attributes.position.array.set(this.loop.positions(this.pos));
+    const P = this.loop.positions(this.pos);
+    g.attributes.position.array.set(P);
     g.attributes.position.needsUpdate = true;
     g.computeVertexNormals();
+    const N = g.attributes.normal.array;
+    // fold valleys are darker (light does not reach in), crests a touch lighter
+    const n = P.length / 3, E = this.dispEdges;
+    const sum = this._sum || (this._sum = new Float32Array(n * 3));
+    const cnt = this._cnt || (this._cnt = new Float32Array(n));
+    const len = this._len || (this._len = new Float32Array(n));
+    sum.fill(0); cnt.fill(0); len.fill(0);
+    for (let e = 0; e < E.length; e += 2) {
+      const a = E[e] * 3, b = E[e + 1] * 3;
+      const l = Math.hypot(P[a] - P[b], P[a + 1] - P[b + 1], P[a + 2] - P[b + 2]);
+      sum[a] += P[b]; sum[a + 1] += P[b + 1]; sum[a + 2] += P[b + 2];
+      sum[b] += P[a]; sum[b + 1] += P[a + 1]; sum[b + 2] += P[a + 2];
+      cnt[E[e]]++; cnt[E[e + 1]]++; len[E[e]] += l; len[E[e + 1]] += l;
+    }
+    const col = g.attributes.color.array;
+    for (let i = 0; i < n; i++) {
+      const o = i * 3, c = cnt[i] || 1;
+      const k = ((sum[o] / c - P[o]) * N[o] + (sum[o + 1] / c - P[o + 1]) * N[o + 1] + (sum[o + 2] / c - P[o + 2]) * N[o + 2]) / (len[i] / c + 1e-9);
+      const v = k > 0 ? 1 - 0.55 * Math.min(1, k / 0.25) : 1 + 0.06 * Math.min(1, -k / 0.25);
+      col[o] = col[o + 1] = col[o + 2] = v;
+    }
+    g.attributes.color.needsUpdate = true;
+    // hem band: from the edge, turned in by the fabric's thickness
+    const sp = this.hemStrip.geometry.attributes.position.array;
+    const B = this.hemVerts.length, th = 0.003;
+    this.hemVerts.forEach((v, k) => {
+      const o = v * 3;
+      for (let c = 0; c < 3; c++) { sp[k * 3 + c] = P[o + c]; sp[(B + k) * 3 + c] = P[o + c] - N[o + c] * th; }
+    });
+    this.hemStrip.geometry.attributes.position.needsUpdate = true;
+    this.hemStrip.geometry.computeVertexNormals();
   }
 
   dispose() {
     this.mesh.geometry.dispose();
-    this.mesh.material.dispose();
+    this.hemStrip.geometry.dispose();
+    this.material.dispose();
   }
 }
