@@ -1,2 +1,38 @@
 # pose-app
-AI auto-pose 3D reference tool for artists
+
+AI auto-pose 3D reference tool for artists. Prototype v0.1.
+
+Drag a few dots and the whole body follows into a natural pose. The tool generates no images, only poses.
+
+## Run
+
+```bash
+npm install
+npm run dev      # local dev server (also reachable from a phone on the same Wi-Fi)
+npm test         # headless checks for the posing engine and the skirt cloth
+npm run build    # one self-contained dist/index.html
+```
+
+## What's in v0.1
+
+- Wooden drawing mannequin built from simple shapes. No third-party assets.
+- Auto-pose: drag hands, feet, head or hips. If the target is out of reach, the spine bends and the hips move to help.
+- Pins: feet start planted. A dragged hand or foot stays pinned (red). Tap a dot to pin or unpin it.
+- Joint limits: elbows and knees are hinges, and the spine and neck stay inside human ranges. Hands are kept out of the torso.
+- FK: drag any body part to rotate that joint. Drag the pelvis to turn or tilt the whole body.
+- Touch-first toolbar: undo/redo, reset, camera views, lens (FOV with dolly), snapshot, timer for speed tests, FPS.
+- Skirt physics test: position-based cloth with leg collisions, sub-stepped so fast kicks don't tunnel through.
+- Languages: EN / ES / PT / KO.
+
+## Code map
+
+| File | What it does |
+| --- | --- |
+| `src/rig.js` | Skeleton (bones, rest pose, snapshot/restore) |
+| `src/ik.js` | Two-bone IK, CCD pass, joint limits, FK aim |
+| `src/poser.js` | Full-body solver: effectors, pins, body-follow, undo state |
+| `src/mannequin.js` | Mannequin meshes attached to bones |
+| `src/cloth.js` | Skirt cloth simulation |
+| `src/main.js` | Scene, input, UI |
+| `src/i18n.js` | UI strings |
+| `test/solver.test.mjs` | Headless engine checks |
