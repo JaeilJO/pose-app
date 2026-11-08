@@ -24,7 +24,7 @@ const fresh = (m = 'male') => { const rig = createHumanRig(MODELS[m]); const bod
   ok(bb.max.y > 1.6 && bb.max.y < 1.85, `standing height ${bb.max.y.toFixed(2)} m`);
   const handL = rig.worldPos('hand.L'), hip = rig.worldPos('thigh.L');
   ok(handL.y < hip.y + 0.15 && handL.x > 0.15, `arms hang at the sides (left wrist ${handL.toArray().map((n) => n.toFixed(2))})`);
-  ok(Math.abs(hingeAngle(rig.bones['foreArm.L']) + 0.22) < 1e-3, 'elbow rest bend is a pure hinge');
+  ok(Math.abs(hingeAngle(rig.bones['foreArm.L']) + 0.3) < 1e-3, 'elbow rest bend is a pure hinge');
   const a = rig.worldPos('foot.L'), b = rig.worldPos('foot.R');
   ok(a.distanceTo(b) < 0.4, `feet ${a.distanceTo(b).toFixed(2)} m apart`);
 }
@@ -128,6 +128,12 @@ for (const m of ['male', 'female']) {
   run(3);
   const sag = j.out[0].clone();
   ok(sag.y < -0.005, `bent over: breasts hang toward the floor (${(sag.y * 100).toFixed(1)} cm)`);
+}
+for (const m of ['male', 'female']) {
+  const data = MODELS[m];
+  const spread = (vals) => { const sh = shapeBody(data, { ...data.shapeBase, ...vals }); const r = createHumanRig(data, sh); buildHuman(r, data, sh); const d = r.worldPos('foreArm.L').sub(r.worldPos('upperArm.L')).normalize(); return Math.atan2(d.x, -d.y) * 180 / Math.PI; };
+  const lean = spread({ weight: 0 }), heavy = spread({ weight: 1 });
+  ok(lean > 0 && lean < 15 && heavy > lean + 3, `${m} arms hang close and clear a heavier body (${lean.toFixed(1)}° → ${heavy.toFixed(1)}°)`);
 }
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

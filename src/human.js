@@ -249,7 +249,7 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   mesh.updateMatrixWorld(true);
   mesh.bind(new THREE.Skeleton(rig.boneList));
 
-  standingPose(rig);
+  standingPose(rig, armSpread(rig, mesh, dec));
   // Put the soles on the floor.
   mesh.computeBoundingBox();
   rig.bones.hips.position.y -= mesh.boundingBox.min.y;
@@ -261,12 +261,73 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   return { mesh, material, outline: null, height: mesh.boundingBox.max.y };
 }
 
-function standingPose(rig) {
+// How far out the arms hang: the hands should clear the hips and thighs by STAND.gap, whatever the build
+// (broad lats, wide hips, body fat). Measured on the skinned arm against the trunk's width at each height.
+function armSpread(rig, mesh, dec) {
+  const P = mesh.geometry.attributes.position.array;
+  const si = dec.skinIndex, sw = dec.skinWeight;
+  const n = P.length / 3;
+  const B = rig.boneList.map((b) => b.name);
+  const trunk = new Set(['hips', 'spine', 'chest', 'thigh.L', 'thigh.R'].map((b) => B.indexOf(b)));
+  const armL = new Set(['foreArm.L', 'hand.L'].map((b) => B.indexOf(b)));
+  const dom = (i) => { let b = 0; for (let k = 1; k < 4; k++) if (sw[i * 4 + k] > sw[i * 4 + b]) b = k; return si[i * 4 + b]; };
+  rig.update();
+  const sh = rig.worldPos('upperArm.L');
+  // trunk half-width (left side) per 1 cm of height, in the bind pose
+  const y0 = -1.5, bins = new Float32Array(400).fill(-1);
+  const arm = [];
+  for (let i = 0; i < n; i++) {
+    const d = dom(i), x = P[i * 3], y = P[i * 3 + 1];
+    if (trunk.has(d) && x > 0) { const k = Math.floor((y - y0) * 100); if (k >= 0 && k < 400) bins[k] = Math.max(bins[k], x); }
+    else if (armL.has(d) && i % 2 === 0) arm.push(i); // forearm and hand: they pass the waist, hips and thighs
+  }
+  const inv = mesh.skeleton.boneInverses, bones = mesh.skeleton.bones;
+  const M = bones.map(() => new THREE.Matrix4()), v = new THREE.Vector3(), acc = new THREE.Vector3(), t = new THREE.Vector3();
+  const gapAt = (a) => {
+    standingPose(rig, a);
+    rig.update();
+    bones.forEach((b, k) => M[k].multiplyMatrices(b.matrixWorld, inv[k]));
+    let gap = Infinity;
+    for (const i of arm) {
+      v.fromArray(P, i * 3);
+      acc.set(0, 0, 0);
+      for (let k = 0; k < 4; k++) { const w = sw[i * 4 + k] / 255; if (w) acc.addScaledVector(t.copy(v).applyMatrix4(M[si[i * 4 + k]]), w); }
+      const b = Math.floor((acc.y - y0) * 100);
+      if (b >= 0 && b < 400 && bins[b] > 0) gap = Math.min(gap, acc.x - bins[b]);
+    }
+    return gap;
+  };
+  // the gap grows almost linearly with the spread: two probes and one correction
+  let a0 = 0.02, a1 = 0.25, g0 = gapAt(a0), g1 = gapAt(a1);
+  let a = a0 + ((STAND.gap - g0) * (a1 - a0)) / (g1 - g0 || 1e-6);
+  a = Math.min(0.35, Math.max(0.0, a));
+  const g = gapAt(a);
+  a = Math.min(0.35, Math.max(0.0, a + ((STAND.gap - g) * (a1 - a0)) / (g1 - g0 || 1e-6)));
+  return a;
+}
+
+// Relaxed standing pose. Limbs get a full orientation (not just a direction), so every body stands the
+// same way however its source sculpt held its arms: hinge axis = the body's left-right axis, which makes
+// elbows point back, knees point forward and the palms face the thighs.
+const STAND = globalThis.STAND_CFG || { armFwd: 0.03, elbow: -0.3, legOut: 0.035, handTwist: 0, handFlex: 0, gap: 0.022 };
+function setLimb(rig, name, dir) {
+  const y = dir.clone().normalize().negate();
+  const x = new THREE.Vector3(1, 0, 0).addScaledVector(y, -y.x).normalize();
+  const z = new THREE.Vector3().crossVectors(x, y);
+  rig.setWorldQuat(name, new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z)));
+  rig.bones[name].updateMatrixWorld(true);
+}
+function standingPose(rig, armOut = 0.12) {
   for (const s of ['L', 'R']) {
     const side = s === 'L' ? 1 : -1;
-    rig.aimWorld(`upperArm.${s}`, new THREE.Vector3(side * 0.2, -1, 0.02));
-    rig.bones[`foreArm.${s}`].quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.22);
-    rig.aimWorld(`thigh.${s}`, new THREE.Vector3(side * 0.03, -1, 0));
+    setLimb(rig, `upperArm.${s}`, new THREE.Vector3(side * armOut, -1, STAND.armFwd));
+    rig.bones[`foreArm.${s}`].quaternion.setFromAxisAngle(new THREE.Vector3(1, 0, 0), STAND.elbow);
+    rig.bones[`foreArm.${s}`].updateMatrixWorld(true);
+    // hand: turn about the forearm (palm toward the thigh) and relax the wrist
+    const h = rig.bones[`hand.${s}`];
+    h.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), side * STAND.handTwist))
+      .premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), STAND.handFlex));
+    setLimb(rig, `thigh.${s}`, new THREE.Vector3(side * STAND.legOut, -1, 0));
     rig.bones[`shin.${s}`].quaternion.identity();
   }
   rig.update();
