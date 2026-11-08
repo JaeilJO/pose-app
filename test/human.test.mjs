@@ -4,6 +4,8 @@ import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightPa
 import { Poser } from '../src/poser.js';
 import { Jiggle } from '../src/jiggle.js';
 import { Collider } from '../src/collide.js';
+import { cutGarment, Garment } from '../src/garments.js';
+import { bodyBase, shapeBody as _sb } from '../src/human.js';
 import { hingeAngle } from '../src/ik.js';
 
 let failed = 0;
@@ -149,6 +151,31 @@ for (const m of ['male', 'female']) {
   const worst = Math.max(...['hand.L', 'foot.R'].map((l) => col.deepest(l)?.o || 0));
   ok(worst < 0.004, `${m} hand into the belly and foot across the leg stay outside (worst overlap ${(worst * 1000).toFixed(1)} mm)`);
   ok(poser.handleWorld('hand.L').z > hp.z, `${m} the hand stops in front of the belly, not behind the back`);
+}
+for (const [m, kinds] of [['male', ['tshirt', 'pants']], ['female', ['tank', 'skirt']], ['male', ['shorts']]]) {
+  const { rig, body, poser } = fresh(m);
+  const col = new Collider(rig, body.mesh);
+  poser.collider = col;
+  const base = bodyBase(MODELS[m], _sb(MODELS[m]));
+  const gs = kinds.map((k) => new Garment(cutGarment(k, base), body.mesh, col, rig));
+  for (const g of gs) g.reset();
+  poser.beginDrag('hips');
+  const from = poser.handleWorld('hips'), to = from.clone().add(v(0, -0.35, -0.12));
+  for (let i = 1; i <= 30; i++) { poser.dragTo(from.clone().lerp(to, i / 30)); rig.root.updateMatrixWorld(true); for (const g of gs) g.update(1 / 60); }
+  poser.endDrag();
+  for (let f = 0; f < 40; f++) { rig.root.updateMatrixWorld(true); for (const g of gs) g.update(1 / 60); }
+  let finite = true, under = 0, fitted = 0;
+  for (const g of gs) {
+    for (const x of g.pos) if (!Number.isFinite(x)) finite = false;
+    if (!g.targetN) continue;
+    for (let i = 0; i < g.n; i++) {
+      const o = i * 3;
+      const h = (g.pos[o] - g.target[o]) * g.targetN[o] + (g.pos[o + 1] - g.target[o + 1]) * g.targetN[o + 1] + (g.pos[o + 2] - g.target[o + 2]) * g.targetN[o + 2];
+      fitted++;
+      if (h < -1e-4) under++;
+    }
+  }
+  ok(finite && under === 0, `${m} ${kinds.join('+')} in a squat: cloth never sinks into the body (${under}/${fitted})`);
 }
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

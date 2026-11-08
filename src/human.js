@@ -72,6 +72,10 @@ function decoded(data) {
     cache.set(data, {
       base,
       loop,
+      baseIndex: index,
+      baseSkinIndex: skinIndex,
+      baseSkinWeight: skinWeight,
+      baseSoft: bytes(data.soft),
       index: loop.index,
       edges: uniqueEdges(loop.index),
       skinIndex: sIdx,
@@ -97,6 +101,25 @@ function endWeight(v, b) {
  * low or high end: height, weight (body fat), muscle, and the body parts (chest, belly, ...).
  * Also returns how defined the muscles should look (lean + muscular = strong grooves).
  */
+/** The unsubdivided body in its bind pose, for building clothes that fit it. */
+export function bodyBase(data, shaped) {
+  const dec = decoded(data);
+  // the surface as drawn (subdivided + sculpt detail), sampled at the base vertices; clothes must clear it
+  const n = shaped.positions.length / 3;
+  const S = dec.loop.positions(shaped.positions);
+  const N = vertexNormals(S, dec.index);
+  const st = data.detailStep * shaped.detail;
+  const P = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const h = Math.max(0, dec.detail[i] * st); // bulges count, dips do not
+    for (let c = 0; c < 3; c++) P[i * 3 + c] = S[i * 3 + c] + h * N[i * 3 + c];
+  }
+  return {
+    P, T: dec.baseIndex, joints: shaped.joints, bones: data.bones,
+    skinIndex: dec.baseSkinIndex, skinWeight: dec.baseSkinWeight, soft: dec.baseSoft,
+  };
+}
+
 export function shapeBody(data, values = {}) {
   const dec = decoded(data);
   const positions = Float32Array.from(dec.base);
@@ -258,6 +281,18 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
 
   // No ink outline: form reads from light and AO, like a studio maquette.
   mesh.computeBoundingBox();
+  // Clothes can hide the skin they cover (no poke-through): base triangle t is drawn as
+  // subdivided triangles t, m+t, 2m+t, 3m+t.
+  const fullIndex = g.index.array;
+  const m = dec.baseIndex.length / 3;
+  mesh.userData.setHidden = (hidden) => {
+    if (!hidden) { g.setIndex(new THREE.BufferAttribute(fullIndex, 1)); return; }
+    const keep = [];
+    for (let b = 0; b < 4; b++) for (let t = 0; t < m; t++) if (!hidden[t]) keep.push(b * m + t);
+    const idx = new (fullIndex.constructor)(keep.length * 3);
+    keep.forEach((t, k) => { idx[k * 3] = fullIndex[t * 3]; idx[k * 3 + 1] = fullIndex[t * 3 + 1]; idx[k * 3 + 2] = fullIndex[t * 3 + 2]; });
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+  };
   return { mesh, material, outline: null, height: mesh.boundingBox.max.y };
 }
 

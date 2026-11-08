@@ -1,7 +1,7 @@
 export const STRINGS = {
   en: {
     title: 'Pose prototype',
-    undo: 'Undo', redo: 'Redo', reset: 'Reset', view: 'View', pins: 'Dots', skirt: 'Skirt', snap: 'Snapshot', lens: 'Lens', timer: 'Timer',
+    undo: 'Undo', redo: 'Redo', reset: 'Reset', view: 'View', pins: 'Dots', clothes: 'Clothes', top: 'Top', bottom: 'Bottom', none: 'None', tshirt: 'T-shirt', tank: 'Tank top', pants: 'Pants', shorts: 'Shorts', skirtItem: 'Skirt', snap: 'Snapshot', lens: 'Lens', timer: 'Timer',
     hint1: 'Drag a dot to pose. The body follows.',
     hint2: 'Tap a dot to pin or unpin it. Red = pinned.',
     hint3: 'Drag a body part to rotate that joint. Drag empty space to orbit, pinch to zoom.',
@@ -15,7 +15,7 @@ export const STRINGS = {
   },
   es: {
     title: 'Prototipo de poses',
-    undo: 'Deshacer', redo: 'Rehacer', reset: 'Reiniciar', view: 'Vista', pins: 'Puntos', skirt: 'Falda', snap: 'Captura', lens: 'Lente', timer: 'Tiempo',
+    undo: 'Deshacer', redo: 'Rehacer', reset: 'Reiniciar', view: 'Vista', pins: 'Puntos', clothes: 'Ropa', top: 'Arriba', bottom: 'Abajo', none: 'Nada', tshirt: 'Camiseta', tank: 'Sin mangas', pants: 'Pantalón', shorts: 'Pantalón corto', skirtItem: 'Falda', snap: 'Captura', lens: 'Lente', timer: 'Tiempo',
     hint1: 'Arrastra un punto para posar. El cuerpo lo sigue.',
     hint2: 'Toca un punto para fijarlo o soltarlo. Rojo = fijo.',
     hint3: 'Arrastra una parte del cuerpo para rotar esa articulación. Arrastra el fondo para girar la cámara y pellizca para hacer zoom.',
@@ -29,7 +29,7 @@ export const STRINGS = {
   },
   pt: {
     title: 'Protótipo de poses',
-    undo: 'Desfazer', redo: 'Refazer', reset: 'Redefinir', view: 'Vista', pins: 'Pontos', skirt: 'Saia', snap: 'Captura', lens: 'Lente', timer: 'Tempo',
+    undo: 'Desfazer', redo: 'Refazer', reset: 'Redefinir', view: 'Vista', pins: 'Pontos', clothes: 'Roupas', top: 'Parte de cima', bottom: 'Parte de baixo', none: 'Nada', tshirt: 'Camiseta', tank: 'Regata', pants: 'Calça', shorts: 'Short', skirtItem: 'Saia', snap: 'Captura', lens: 'Lente', timer: 'Tempo',
     hint1: 'Arraste um ponto para posar. O corpo acompanha.',
     hint2: 'Toque em um ponto para fixar ou soltar. Vermelho = fixo.',
     hint3: 'Arraste uma parte do corpo para girar essa articulação. Arraste o fundo para girar a câmera e use pinça para zoom.',
@@ -43,7 +43,7 @@ export const STRINGS = {
   },
   ko: {
     title: '포즈 프로토타입',
-    undo: '실행 취소', redo: '다시 실행', reset: '초기화', view: '시점', pins: '점 표시', skirt: '치마', snap: '캡처', lens: '렌즈', timer: '타이머',
+    undo: '실행 취소', redo: '다시 실행', reset: '초기화', view: '시점', pins: '점 표시', clothes: '옷', top: '상의', bottom: '하의', none: '없음', tshirt: '티셔츠', tank: '민소매', pants: '긴바지', shorts: '반바지', skirtItem: '치마', snap: '캡처', lens: '렌즈', timer: '타이머',
     hint1: '점을 끌면 포즈가 잡히고 몸이 따라와요.',
     hint2: '점을 탭하면 고정되거나 풀려요. 빨간색이 고정이에요.',
     hint3: '몸을 끌면 그 관절이 돌아가요. 빈 곳을 끌면 카메라가 돌고, 두 손가락으로 확대해요.',

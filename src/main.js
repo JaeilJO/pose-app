@@ -3,8 +3,8 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Poser, EFFECTOR_NAMES } from './poser.js';
 import { buildProxies } from './proxies.js';
-import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, HEIGHT_RANGE_CM, MODELS, MODEL_NAMES } from './human.js';
-import { Skirt } from './cloth.js';
+import { createHumanRig, buildHuman, transferPose, shapeBody, bodyBase, heightOf, heightParam, HEIGHT_RANGE_CM, MODELS, MODEL_NAMES } from './human.js';
+import { cutGarment, Garment } from './garments.js';
 import { Jiggle } from './jiggle.js';
 import { Collider } from './collide.js';
 import { STRINGS, detectLang } from './i18n.js';
@@ -66,8 +66,12 @@ let jiggle = null;
 let rig;
 let meshes; // invisible touch targets
 let poser;
-let skirt;
-let skirtOn = false;
+// clothes: one top and one bottom at a time
+const worn = { top: null, bottom: null };
+let garments = [];
+let bodyMesh = null;
+let bodyShaped = null;
+let garmentTimer = 0;
 const highlight = () => {};
 
 function disposeTree(obj) {
@@ -112,13 +116,42 @@ function loadModel(name) {
   modelName = name;
   scene.add(rig.root);
   meshes = buildProxies(rig);
-  if (skirt) {
-    scene.remove(skirt.mesh);
-    skirt.mesh.geometry.dispose();
+  bodyMesh = body.mesh;
+  bodyShaped = shaped;
+  scheduleGarments(old ? 160 : 0); // cutting clothes takes a moment: wait until the sliders stop
+}
+
+function clearGarments() {
+  for (const g of garments) { scene.remove(g.mesh); g.dispose(); }
+  garments = [];
+  if (bodyMesh) bodyMesh.userData.setHidden(null);
+}
+
+// (Re)cut the worn clothes for the current body. Rest lengths come from the rest pose, so this
+// works in any pose; the cloth then settles onto the body as it is posed now.
+function buildGarments() {
+  clearGarments();
+  const kinds = [worn.top, worn.bottom].filter(Boolean);
+  if (!kinds.length) return;
+  const base = bodyBase(MODELS[modelName], bodyShaped);
+  const hidden = new Uint8Array(base.T.length / 3);
+  rig.update();
+  for (const k of kinds) {
+    const g = new Garment(cutGarment(k, base), bodyMesh, poser.collider, rig);
+    if (g.hidden) g.hidden.forEach((h, t) => { if (h) hidden[t] = 1; });
+    scene.add(g.mesh);
+    garments.push(g);
   }
-  skirt = new Skirt(rig);
-  skirt.mesh.visible = skirtOn;
-  scene.add(skirt.mesh);
+  bodyMesh.userData.setHidden(hidden);
+  for (const g of garments) g.reset();
+}
+
+function scheduleGarments(delay) {
+  clearTimeout(garmentTimer);
+  if (!worn.top && !worn.bottom) { clearGarments(); return; }
+  if (!delay) { buildGarments(); return; }
+  clearGarments();
+  garmentTimer = setTimeout(buildGarments, delay);
 }
 loadModel(modelName);
 
@@ -241,7 +274,7 @@ function pushUndo() {
 function afterJump() {
   rig.update();
   jiggle.settle();
-  if (skirtOn) skirt.reset();
+  for (const g of garments) g.reset();
   refreshButtons();
 }
 function undo() {
@@ -392,16 +425,20 @@ const actions = {
     handleGroup.visible = handlesVisible;
     btn('pins').classList.toggle('on', handlesVisible);
   },
-  skirt() {
-    skirtOn = !skirtOn;
-    skirt.mesh.visible = skirtOn;
-    if (skirtOn) skirt.reset();
-    btn('skirt').classList.toggle('on', skirtOn);
+  clothes() {
+    const panel = document.getElementById('clothesPanel');
+    panel.hidden = !panel.hidden;
+    btn('clothes').classList.toggle('on', !panel.hidden);
+    if (!panel.hidden) {
+      document.getElementById('bodyPanel').hidden = true;
+      btn('body').classList.remove('on');
+    }
   },
   snap: snapshot,
   body() {
     const panel = document.getElementById('bodyPanel');
     panel.hidden = !panel.hidden;
+    if (!panel.hidden) { document.getElementById('clothesPanel').hidden = true; btn('clothes').classList.remove('on'); }
     btn('body').classList.toggle('on', !panel.hidden);
     if (!panel.hidden) refreshBodyPanel();
   },
@@ -482,6 +519,23 @@ document.getElementById('shapeReset').addEventListener('click', () => {
 });
 document.getElementById('bodyClose').addEventListener('click', () => actions.body());
 
+// ---------- clothes panel ----------
+function refreshClothes() {
+  document.querySelectorAll('[data-wear]').forEach((b) => {
+    const [slot, kind] = b.dataset.wear.split(':');
+    b.classList.toggle('on', (worn[slot] || 'none') === kind);
+  });
+  btn('clothes').querySelector('em').textContent = worn.top || worn.bottom ? '●' : '';
+}
+document.querySelectorAll('[data-wear]').forEach((b) => b.addEventListener('click', () => {
+  const [slot, kind] = b.dataset.wear.split(':');
+  worn[slot] = kind === 'none' ? null : kind;
+  refreshClothes();
+  scheduleGarments(0);
+}));
+document.getElementById('clothesClose').addEventListener('click', () => actions.clothes());
+refreshClothes();
+
 // ---------- timer (for speed tests) ----------
 const timerBtn = document.getElementById('timerBtn');
 const timerText = document.getElementById('timerText');
@@ -556,7 +610,7 @@ function frame(now) {
     if (tween.t >= 1) tween = null;
   }
   controls.update();
-  if (skirtOn) skirt.update(dt);
+  for (const g of garments) g.update(dt);
   rig.root.updateMatrixWorld(true);
   jiggle.update(dt);
   updateHandles();

@@ -79,7 +79,7 @@ export class Collider {
         const r = Math.min(0.9 * (c.zmax - c.zmin) / 2, side);
         if (r < 0.012) continue;
         const bone = [...c.votes.entries()].sort((a, b) => b[1] - a[1])[0][0];
-        S.push({ bone, c: new THREE.Vector3(xc, ymin + (c.sy + 0.5) * SLAB, (c.zmin + c.zmax) / 2), r, group });
+        S.push({ bone, c: new THREE.Vector3(xc, ymin + (c.sy + 0.5) * SLAB, (c.zmin + c.zmax) / 2), r, rs: r, group });
       }
     };
     columns(TRUNK, 'trunk');
@@ -109,7 +109,8 @@ export class Collider {
         c.divideScalar(ids.length);
         const d = ids.map((i) => { _v.fromArray(P, i * 3).sub(c); return _v.sub(axis.clone().multiplyScalar(_v.dot(axis))).length(); }).sort((x, y) => x - y);
         const r = 0.85 * d[Math.floor(d.length * 0.3)];
-        if (r > 0.008) S.push({ bone: id, c, r, group });
+        const rs = d[Math.floor(d.length * 0.9)]; // out to the skin, for cloth
+        if (r > 0.008) S.push({ bone: id, c, r, rs, group });
       }
     };
     const far = (bone, from) => { // farthest vertex of a bone (fingertip, toe)

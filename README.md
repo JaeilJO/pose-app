@@ -17,6 +17,7 @@ npm run build    # one self-contained dist/index.html
 
 - Two realistic mannequin bodies (male, female): MakeHuman's CC0 base mesh, targets, skeleton and skin weights, fitted onto Blender Studio's CC0 realistic sculpts for anatomy, drawn once-subdivided with the sculpt's surface detail (`tools/build_human.py`, `tools/sculpt_fit.py`, `tools/subdiv.py`). Body panel: male/female, height, body fat, muscle, and shoulders/chest/arms/belly/hips/thighs/calves; the pose carries over.
 - Chest and belly jiggle with gravity sag (`src/jiggle.js`).
+- Clothes (`src/garments.js`): t-shirt, tank top, long pants, shorts, skirt. Fitted pieces are cut from the body itself, so they fit every body shape; where the pose squeezes the fabric it buckles into folds (heights along the surface normal, so it can never sink into the body), and the body under the cloth is hidden. The skirt is a cloth simulation that hangs from the hips and is pushed out by the legs.
 - Self-collision: arms and legs stay out of the body and each other; a hand or foot dragged into the body stops at its surface (`src/collide.js`).
 - Auto-pose: drag hands, feet, head or hips. If the target is out of reach, the spine bends and the hips move to help.
 - Pins: feet start planted. A dragged hand or foot stays pinned (red). Tap a dot to pin or unpin it.

@@ -225,3 +225,8 @@ button.chip { cursor: pointer; }
   .panel { left: 16px; top: 50%; bottom: auto; transform: translateY(-50%); width: 320px; }
   .panel-body { max-height: min(70vh, 560px); }
 }
+
+.panel-head strong { font-size: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+.chips button { height: 34px; padding: 0 12px; font: inherit; font-size: 13px; color: var(--ink); background: rgba(0, 0, 0, 0.05); border: 1px solid transparent; border-radius: 17px; cursor: pointer; }
+.chips button.on { color: #fff; background: var(--accent); }
