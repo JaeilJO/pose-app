@@ -8,7 +8,7 @@
     "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host",
-    "test": "node test/solver.test.mjs"
+    "test": "node test/solver.test.mjs && node test/human.test.mjs"
   },
   "repository": {
     "type": "git",

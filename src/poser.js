@@ -28,7 +28,6 @@ const FWD = new THREE.Vector3(0, 0, 1);
 const RIGHT = new THREE.Vector3(1, 0, 0);
 const IDENTITY = new THREE.Quaternion();
 
-const ANKLE_HEIGHT = 0.05;
 const MIN_HIPS_Y = 0.22;
 const TORSO_RADIUS = 0.17;
 
@@ -37,6 +36,7 @@ export class Poser {
     this.rig = rig;
     this.armReach = rig.length('foreArm.L') + rig.length('hand.L');
     this.legReach = rig.length('shin.L') + rig.length('foot.L');
+    this.ankleHeight = Math.min(rig.worldPos('foot.L').y, rig.worldPos('foot.R').y);
     this.active = null; // effector drag
     this.fk = null; // bone rotation drag
     this.t = {
@@ -128,7 +128,7 @@ export class Poser {
 
   clampTarget(name, target) {
     const kind = EFFECTORS[name].kind;
-    if (kind === 'leg') target.y = Math.max(target.y, ANKLE_HEIGHT);
+    if (kind === 'leg') target.y = Math.max(target.y, this.ankleHeight);
     else if (kind === 'hips') target.y = Math.max(target.y, MIN_HIPS_Y);
     else if (kind === 'head') target.y = Math.max(target.y, 0.2);
     else if (kind === 'arm') {

@@ -6,7 +6,8 @@ import * as THREE from 'three';
 const sphere = new THREE.SphereGeometry(1, 28, 18);
 const UP = new THREE.Vector3(0, 1, 0);
 
-export function buildMannequin(rig) {
+// With { proxy: true } the shapes are invisible: they only serve as touch/click targets.
+export function buildMannequin(rig, { proxy = false } = {}) {
   const meshes = [];
   const materials = {};
   const matFor = (bone, joint = false) => {
@@ -26,8 +27,9 @@ export function buildMannequin(rig) {
     m.position.set(...pos);
     if (scale) m.scale.set(...scale);
     if (quat) m.quaternion.copy(quat);
-    m.castShadow = true;
-    m.receiveShadow = true;
+    m.castShadow = !proxy;
+    m.receiveShadow = !proxy;
+    m.visible = !proxy;
     m.userData.bone = bone;
     rig.bones[bone].add(m);
     meshes.push(m);

@@ -1,20 +1,25 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Rig } from './rig.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Poser, EFFECTOR_NAMES } from './poser.js';
-import { buildMannequin } from './mannequin.js';
+import { buildProxies } from './proxies.js';
+import { createHumanRig, buildHuman } from './human.js';
 import { Skirt } from './cloth.js';
 import { STRINGS, detectLang } from './i18n.js';
 
 // ---------- renderer / scene ----------
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 1.0;
 
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xe9e9ec);
+const scene = new THREE.Scene(); // background is a CSS gradient behind the canvas
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.32;
 
 const camera = new THREE.PerspectiveCamera(40, 1, 0.05, 60);
 const controls = new OrbitControls(camera, canvas);
@@ -23,29 +28,41 @@ controls.enableDamping = true;
 controls.minDistance = 0.6;
 controls.maxDistance = 12;
 
-scene.add(new THREE.HemisphereLight(0xffffff, 0xb8b0a5, 1.4));
-const sun = new THREE.DirectionalLight(0xffffff, 2.2);
-sun.position.set(2.5, 4.5, 3);
+// Studio lighting: soft key with shadows, cool fill, warm rim.
+scene.add(new THREE.HemisphereLight(0xffffff, 0xaaa59e, 0.4));
+const sun = new THREE.DirectionalLight(0xfff8f0, 3.1);
+sun.position.set(2.2, 4.2, 2.8);
 sun.castShadow = true;
-sun.shadow.mapSize.set(1024, 1024);
-Object.assign(sun.shadow.camera, { left: -2, right: 2, top: 2.5, bottom: -1, near: 0.5, far: 12 });
-sun.shadow.bias = -0.0005;
-sun.shadow.normalBias = 0.02;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -1.6, right: 1.6, top: 2.3, bottom: -0.6, near: 0.5, far: 12 });
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.025;
+sun.shadow.radius = 4;
 scene.add(sun);
+const fill = new THREE.DirectionalLight(0xdfe8ff, 0.45);
+fill.position.set(-3, 2, 1.5);
+scene.add(fill);
+const rimLight = new THREE.DirectionalLight(0xfff0dd, 1.1);
+rimLight.position.set(-1.5, 2.6, -3);
+scene.add(rimLight);
 
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(30, 30), new THREE.ShadowMaterial({ opacity: 0.18 }));
+const ground = new THREE.Mesh(new THREE.CircleGeometry(12, 64), new THREE.ShadowMaterial({ opacity: 0.22 }));
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
-const grid = new THREE.GridHelper(10, 20, 0xb0b0b6, 0xd0d0d5);
+const grid = new THREE.GridHelper(8, 16, 0xbdbab4, 0xd3d0ca);
 grid.position.y = 0.001;
+grid.material.transparent = true;
+grid.material.opacity = 0.55;
 scene.add(grid);
 
 // ---------- figure ----------
-const rig = new Rig();
+const rig = createHumanRig();
 scene.add(rig.root);
+buildHuman(rig); // what you see (also sets the standing rest pose)
+const meshes = buildProxies(rig); // what you touch
 const poser = new Poser(rig);
-const { meshes, highlight } = buildMannequin(rig);
+const highlight = () => {};
 const skirt = new Skirt(rig);
 skirt.mesh.visible = false;
 scene.add(skirt.mesh);
@@ -91,13 +108,17 @@ function updateHandles() {
 }
 
 // A dot behind the body is drawn faded (its own hand/foot/head mesh doesn't count).
-const OWN_BONE = { 'hand.L': 'hand.L', 'hand.R': 'hand.R', 'foot.L': 'foot.L', 'foot.R': 'foot.R', head: 'head', hips: 'hips' };
+const OWN_BONES = {
+  'hand.L': ['hand.L', 'foreArm.L'], 'hand.R': ['hand.R', 'foreArm.R'],
+  'foot.L': ['foot.L', 'shin.L'], 'foot.R': ['foot.R', 'shin.R'],
+  head: ['head', 'neck'], hips: ['hips', 'spine', 'thigh.L', 'thigh.R'],
+};
 const occluder = new THREE.Raycaster();
 function isHidden(name, pos, dist) {
   occluder.set(camera.position, tmpV2.subVectors(pos, camera.position).normalize());
   occluder.far = dist - 0.01;
   for (const hit of occluder.intersectObjects(meshes, false)) {
-    if (hit.object.userData.bone !== OWN_BONE[name]) return true;
+    if (!OWN_BONES[name].includes(hit.object.userData.bone)) return true;
   }
   return false;
 }
@@ -291,8 +312,10 @@ fovInput.addEventListener('input', () => {
 function snapshot() {
   const wasVisible = handleGroup.visible;
   handleGroup.visible = false;
+  scene.background = new THREE.Color(0xeeece8);
   renderer.render(scene, camera);
   const url = canvas.toDataURL('image/png');
+  scene.background = null;
   handleGroup.visible = wasVisible;
   document.getElementById('snapImg').src = url;
   document.getElementById('snapOverlay').hidden = false;

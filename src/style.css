@@ -11,7 +11,12 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; overflow: hidden; background: #e9e9ec; }
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(ellipse at 50% 35%, #f7f6f3 0%, #e9e7e2 55%, #d9d6cf 100%);
+}
 
 #scene {
   position: fixed;

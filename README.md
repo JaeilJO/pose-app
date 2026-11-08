@@ -15,7 +15,7 @@ npm run build    # one self-contained dist/index.html
 
 ## What's in v0.1
 
-- Wooden drawing mannequin built from simple shapes. No third-party assets.
+- Realistic human body (athletic male) built from MakeHuman's CC0 base mesh, targets, skeleton and skin weights (`tools/build_human.py`), with a contour line and baked muscle-groove shading.
 - Auto-pose: drag hands, feet, head or hips. If the target is out of reach, the spine bends and the hips move to help.
 - Pins: feet start planted. A dragged hand or foot stays pinned (red). Tap a dot to pin or unpin it.
 - Joint limits: elbows and knees are hinges, and the spine and neck stay inside human ranges. Hands are kept out of the torso.
@@ -31,8 +31,22 @@ npm run build    # one self-contained dist/index.html
 | `src/rig.js` | Skeleton (bones, rest pose, snapshot/restore) |
 | `src/ik.js` | Two-bone IK, CCD pass, joint limits, FK aim |
 | `src/poser.js` | Full-body solver: effectors, pins, body-follow, undo state |
-| `src/mannequin.js` | Mannequin meshes attached to bones |
+| `src/human.js` | Loads the human body asset, binds it to the rig, sets the standing pose |
+| `src/assets/human.js` | Generated body data (do not edit; rebuild with `tools/build_human.py`) |
+| `src/proxies.js` | Invisible touch targets per bone |
+| `src/body.js` | Contour line helper (and the older procedural body) |
+| `src/mannequin.js` | Older wooden mannequin shapes (unused) |
 | `src/cloth.js` | Skirt cloth simulation |
 | `src/main.js` | Scene, input, UI |
 | `src/i18n.js` | UI strings |
 | `test/solver.test.mjs` | Headless engine checks |
+
+## Assets and licenses
+
+The body comes from [MakeHuman](https://github.com/makehumancommunity/makehuman): its base mesh, targets,
+skeleton and weights were released as CC0 in 2020, so they can be used commercially without attribution.
+Rebuild the asset after cloning MakeHuman:
+
+```bash
+python3 tools/build_human.py <path-to>/makehuman/makehuman/data src/assets/human.js
+```
