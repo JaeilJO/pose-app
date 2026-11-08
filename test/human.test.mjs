@@ -1,6 +1,6 @@
 // Same posing checks, on the MakeHuman-based rig.
 import * as THREE from 'three';
-import { createHumanRig, buildHuman } from '../src/human.js';
+import { createHumanRig, buildHuman, transferPose, MODELS } from '../src/human.js';
 import { Poser } from '../src/poser.js';
 import { hingeAngle } from '../src/ik.js';
 
@@ -13,7 +13,7 @@ function drag(poser, name, to, steps = 30) {
   for (let i = 1; i <= steps; i++) poser.dragTo(from.clone().lerp(to, i / steps));
   poser.endDrag();
 }
-const fresh = () => { const rig = createHumanRig(); const body = buildHuman(rig); return { rig, body, poser: new Poser(rig) }; };
+const fresh = (m = 'male') => { const rig = createHumanRig(MODELS[m]); const body = buildHuman(rig, MODELS[m]); return { rig, body, poser: new Poser(rig) }; };
 
 {
   const { rig, body } = fresh();
@@ -54,6 +54,19 @@ const fresh = () => { const rig = createHumanRig(); const body = buildHuman(rig)
   let finite = true;
   for (let i = 0; i < pos.count; i += 97) { body.mesh.getVertexPosition(i, t); if (!Number.isFinite(t.x + t.y + t.z)) finite = false; }
   ok(finite, 'skinned vertices stay finite in a hard pose');
+}
+{
+  const { rig, body, poser } = fresh('female');
+  body.mesh.computeBoundingBox();
+  ok(Math.abs(body.mesh.boundingBox.min.y) < 0.005 && body.mesh.boundingBox.max.y > 1.5, `female stands on the floor, ${body.mesh.boundingBox.max.y.toFixed(2)} m`);
+  drag(poser, 'hips', rig.bones.hips.position.clone().add(v(0, -0.3, -0.05)));
+  const ankle = rig.worldPos('foot.L').clone();
+  const m = fresh('male');
+  transferPose(rig, m.rig);
+  const kneeF = Math.abs(hingeAngle(rig.bones['shin.L'])), kneeM = Math.abs(hingeAngle(m.rig.bones['shin.L']));
+  ok(Math.abs(kneeF - kneeM) < 0.05, `squat transfers to the other body (knee ${kneeF.toFixed(2)} vs ${kneeM.toFixed(2)})`);
+  ok(m.rig.bones.hips.position.y < m.rig.rest.hips.p.y - 0.2, 'transferred hips are lowered too');
+  ok(ankle.y < 0.12, 'female feet stay on the floor');
 }
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

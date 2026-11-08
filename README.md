@@ -15,7 +15,7 @@ npm run build    # one self-contained dist/index.html
 
 ## What's in v0.1
 
-- Realistic human body (athletic male) built from MakeHuman's CC0 base mesh, targets, skeleton and skin weights (`tools/build_human.py`), with a contour line and baked muscle-groove shading.
+- Two realistic, faceless bodies (athletic male, fit female) built from MakeHuman's CC0 base mesh, targets, skeleton and skin weights (`tools/build_human.py`), with a contour line and baked muscle-groove shading. The Model button swaps bodies and keeps the pose.
 - Auto-pose: drag hands, feet, head or hips. If the target is out of reach, the spine bends and the hips move to help.
 - Pins: feet start planted. A dragged hand or foot stays pinned (red). Tap a dot to pin or unpin it.
 - Joint limits: elbows and knees are hinges, and the spine and neck stay inside human ranges. Hands are kept out of the torso.
@@ -32,7 +32,7 @@ npm run build    # one self-contained dist/index.html
 | `src/ik.js` | Two-bone IK, CCD pass, joint limits, FK aim |
 | `src/poser.js` | Full-body solver: effectors, pins, body-follow, undo state |
 | `src/human.js` | Loads the human body asset, binds it to the rig, sets the standing pose |
-| `src/assets/human.js` | Generated body data (do not edit; rebuild with `tools/build_human.py`) |
+| `src/assets/human-*.js` | Generated body data (do not edit; rebuild with `tools/build_human.py`) |
 | `src/proxies.js` | Invisible touch targets per bone |
 | `src/body.js` | Contour line helper (and the older procedural body) |
 | `src/mannequin.js` | Older wooden mannequin shapes (unused) |
@@ -48,5 +48,6 @@ skeleton and weights were released as CC0 in 2020, so they can be used commercia
 Rebuild the asset after cloning MakeHuman:
 
 ```bash
-python3 tools/build_human.py <path-to>/makehuman/makehuman/data src/assets/human.js
+python3 tools/build_human.py <path-to>/makehuman/makehuman/data src/assets/human-male.js male
+python3 tools/build_human.py <path-to>/makehuman/makehuman/data src/assets/human-female.js female
 ```

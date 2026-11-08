@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { Poser, EFFECTOR_NAMES } from './poser.js';
 import { buildProxies } from './proxies.js';
-import { createHumanRig, buildHuman } from './human.js';
+import { createHumanRig, buildHuman, transferPose, MODELS, MODEL_NAMES } from './human.js';
 import { Skirt } from './cloth.js';
 import { STRINGS, detectLang } from './i18n.js';
 
@@ -57,16 +57,49 @@ grid.material.opacity = 0.55;
 scene.add(grid);
 
 // ---------- figure ----------
-const rig = createHumanRig();
-scene.add(rig.root);
-buildHuman(rig); // what you see (also sets the standing rest pose)
-const meshes = buildProxies(rig); // what you touch
-const poser = new Poser(rig);
-const highlight = () => {};
-const skirt = new Skirt(rig);
-skirt.mesh.visible = false;
-scene.add(skirt.mesh);
+let modelName = 'male';
+let rig;
+let meshes; // invisible touch targets
+let poser;
+let skirt;
 let skirtOn = false;
+const highlight = () => {};
+
+function disposeTree(obj) {
+  obj.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) o.material.dispose();
+  });
+}
+
+// Build (or swap to) a body model. When swapping, the current pose and pins carry over.
+function loadModel(name) {
+  const old = rig ? { rig, poser } : null;
+  const next = createHumanRig(MODELS[name]);
+  buildHuman(next, MODELS[name]); // what you see (also sets the standing rest pose)
+  const nextPoser = new Poser(next);
+  if (old) {
+    transferPose(old.rig, next);
+    nextPoser.pins = { ...old.poser.pins };
+    for (const n in nextPoser.pins) if (nextPoser.pins[n]) nextPoser.recordPin(n);
+    nextPoser.neckLocked = old.poser.neckLocked;
+    scene.remove(old.rig.root);
+    disposeTree(old.rig.root);
+  }
+  rig = next;
+  poser = nextPoser;
+  modelName = name;
+  scene.add(rig.root);
+  meshes = buildProxies(rig);
+  if (skirt) {
+    scene.remove(skirt.mesh);
+    skirt.mesh.geometry.dispose();
+  }
+  skirt = new Skirt(rig);
+  skirt.mesh.visible = skirtOn;
+  scene.add(skirt.mesh);
+}
+loadModel(modelName);
 
 // ---------- handles (dots) ----------
 const COLORS = { free: 0x2f6fed, pinned: 0xff4d4f, active: 0xffb020 };
@@ -344,6 +377,15 @@ const actions = {
     btn('skirt').classList.toggle('on', skirtOn);
   },
   snap: snapshot,
+  model() {
+    if (drag) return;
+    const next = MODEL_NAMES[(MODEL_NAMES.indexOf(modelName) + 1) % MODEL_NAMES.length];
+    loadModel(next);
+    undoStack.length = 0; // saved poses belong to the previous body
+    redoStack.length = 0;
+    refreshButtons();
+    document.getElementById('modelName').textContent = STRINGS[lang].models[modelName];
+  },
 };
 document.querySelectorAll('[data-act]').forEach((b) => b.addEventListener('click', () => actions[b.dataset.act]()));
 document.getElementById('snapClose').addEventListener('click', () => { document.getElementById('snapOverlay').hidden = true; });
@@ -384,6 +426,7 @@ function applyLang() {
   document.documentElement.lang = lang;
   document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = s[el.dataset.i18n]; });
   document.getElementById('viewName').textContent = s.views[viewIndex];
+  document.getElementById('modelName').textContent = s.models[modelName];
   document.title = s.title;
   langSelect.value = lang;
 }

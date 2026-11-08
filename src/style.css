@@ -178,7 +178,7 @@ button.chip { cursor: pointer; }
 
 @media (max-width: 520px) {
   .brand { display: none; }
-  .toolbar button { min-width: 50px; font-size: 10px; }
+  .toolbar button { min-width: 44px; padding: 4px 3px; font-size: 9.5px; }
   .lens { bottom: calc(80px + var(--safe-bottom)); }
   .lens input { width: 90px; }
 }
