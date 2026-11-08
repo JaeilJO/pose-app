@@ -559,6 +559,42 @@ print(f'ao: mean {ao.mean():.2f}, min {ao.min():.2f}')
 ao8 = np.round(np.clip(ao, 0, 1) * 255).astype(np.uint8)
 
 b64 = lambda a: base64.b64encode(a.tobytes()).decode()
+
+# ---------------- soft tissue for jiggle: breasts (MakeHuman breast bones) and belly ----------------
+_wraw = json.load(open(f'{MH}/rigs/default_weights.mhw'))['weights']
+_full = np.zeros((len(V), 2))
+for k_, bone in enumerate(('breast.L', 'breast.R')):
+    for vi, w in _wraw[bone]:
+        _full[vi, k_] += w
+_tot = np.zeros(len(V))
+for bone, pairs in _wraw.items():
+    for vi, w in pairs:
+        _tot[vi] += w
+_full /= np.maximum(_tot, 1e-9)[:, None]
+_n_orig = len(used_c)
+soft = np.zeros((len(P), 3))
+_orig_of = TOPO['used']  # final vertex -> index in the compact pre-faceless mesh (caps are >= len(used_c))
+_ok = _orig_of < _n_orig
+soft[_ok, :2] = _full[used_c[_orig_of[_ok]]]
+belly_c = (J['hips'] * 0.25 + J['spine'] * 0.75)
+_front = P[(np.abs(P[:, 0]) < 0.03) & (np.abs(P[:, 1] - belly_c[1]) < 0.02)][:, 2].max()
+belly_c = np.array([0.0, belly_c[1], _front - 0.07])
+_e = (P[:, 0] / 0.14) ** 2 + ((P[:, 1] - belly_c[1]) / 0.13) ** 2
+_wt = np.clip(1 - _e, 0, 1) ** 1.5 * np.clip((P[:, 2] - belly_c[2]) / 0.06, 0, 1)
+_trunk = Wu[:, [IDX['hips'], IDX['spine']]].sum(1) / Wu.sum(1)
+soft[:, 2] = _wt * _trunk
+for _ in range(6):
+    soft = 0.5 * soft + 0.5 * (ADJ @ soft) / ADJ_DEG[:, None]
+soft /= np.maximum(soft.max(0), 1e-9)
+soft = soft ** 0.75
+soft8 = np.round(np.clip(soft, 0, 1) * 255).astype(np.uint8)
+def _anchor(k, depth):
+    c = (P * soft[:, k:k + 1]).sum(0) / soft[:, k].sum()
+    return (c - np.array([0, 0, depth])).round(4).tolist()  # behind the soft tissue, where it hangs from
+
+
+soft_anchors = {'breast.L': ['chest', _anchor(0, 0.06)], 'breast.R': ['chest', _anchor(1, 0.06)], 'belly': ['spine', _anchor(2, 0.08)]}
+print('soft tissue verts:', (soft > 0.05).sum(0).tolist())
 rnd = lambda d: {k: [round(float(x), 5) for x in v] for k, v in d.items()}
 
 # ---------------- body-shape sliders: offsets at each slider's ends ----------------
@@ -634,6 +670,8 @@ out = (
     f'  skinIndex: "{b64(skin_index.ravel())}",\n'
     f'  skinWeight: "{b64(skin_weight.ravel())}",\n'
     f'  ao: "{b64(ao8)}",\n'
+    f'  soft: "{b64(soft8)}",\n'
+    f'  softAnchors: {json.dumps(soft_anchors)},\n'
     f'  definition: {json.dumps({"base": BASE["define"], **{k: {e: SLIDERS[k][1][e].get("define", 0) for e in ("lo", "hi")} for k in ("weight", "muscle")}})},\n'
     f'  shapeBase: {json.dumps(shape_base)},\n'
     f'  deltaScale: {DELTA_SCALE},\n'

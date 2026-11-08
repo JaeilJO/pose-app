@@ -38,6 +38,7 @@ function decoded(data) {
       skinIndex: bytes(data.skinIndex),
       skinWeight: bytes(data.skinWeight),
       ao: bytes(data.ao),
+      soft: bytes(data.soft),
       deltas,
     });
   }
@@ -167,6 +168,7 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   g.setAttribute('skinWeight', new THREE.BufferAttribute(dec.skinWeight, 4, true));
   // AO (baked) x grooves between muscles (measured on this shape, deeper when lean and muscular).
   g.setAttribute('color', new THREE.BufferAttribute(shadeColors(dec, shaped.positions, shaped.definition), 3, true));
+  g.setAttribute('soft', new THREE.BufferAttribute(dec.soft, 3, true));
   g.computeVertexNormals();
 
   // Matte sculpting clay: soft highlights, a little velvet on the edges; AO and grooves come from vertex colors.
@@ -180,11 +182,27 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
     sheenColor: new THREE.Color(0xf4f2ee),
   });
 
+  // Soft tissue (breasts, belly) is pushed by the jiggle simulation after skinning.
+  const softUniform = { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] };
+  const withSoft = (m) => {
+    m.onBeforeCompile = (shader) => {
+      shader.uniforms.softOffset = softUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute vec3 soft;\nuniform vec3 softOffset[3];')
+        .replace('#include <skinning_vertex>', '#include <skinning_vertex>\n\ttransformed += soft.x * softOffset[0] + soft.y * softOffset[1] + soft.z * softOffset[2];');
+    };
+    m.customProgramCacheKey = () => 'soft-tissue';
+    return m;
+  };
+  withSoft(material);
+
   // Bind in the source pose (arms out, elbows bent), then move to a relaxed standing pose.
   rig.update();
   const mesh = new THREE.SkinnedMesh(g, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
+  mesh.customDepthMaterial = withSoft(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking }));
+  mesh.userData.softOffset = softUniform.value;
   mesh.frustumCulled = false;
   rig.root.add(mesh);
   mesh.updateMatrixWorld(true);

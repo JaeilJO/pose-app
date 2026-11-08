@@ -5,6 +5,7 @@ import { Poser, EFFECTOR_NAMES } from './poser.js';
 import { buildProxies } from './proxies.js';
 import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, HEIGHT_RANGE_CM, MODELS, MODEL_NAMES } from './human.js';
 import { Skirt } from './cloth.js';
+import { Jiggle } from './jiggle.js';
 import { STRINGS, detectLang } from './i18n.js';
 
 // ---------- renderer / scene ----------
@@ -60,6 +61,7 @@ scene.add(grid);
 let modelName = 'male';
 const shapeValues = Object.fromEntries(MODEL_NAMES.map((n) => [n, { ...MODELS[n].shapeBase }]));
 let bodyHeight = 0;
+let jiggle = null;
 let rig;
 let meshes; // invisible touch targets
 let poser;
@@ -74,12 +76,24 @@ function disposeTree(obj) {
   });
 }
 
+// How soft the chest and belly are, from the body sliders (0 = firm).
+function softness(name, v) {
+  const fat = Math.max(0, v.weight - 0.25);
+  if (name === 'female') {
+    return { breast: 0.55 + 0.9 * (v.chest - 0.5) + 0.8 * fat, belly: 0.15 + 1.3 * fat + 0.9 * Math.max(0, v.belly - 0.5) };
+  }
+  return { breast: 0.05 + 1.1 * fat + 0.3 * Math.max(0, v.chest - 0.5), belly: 0.1 + 1.3 * fat + 0.9 * Math.max(0, v.belly - 0.5) };
+}
+
 // Build (or swap to) a body model. When swapping, the current pose and pins carry over.
 function loadModel(name) {
   const old = rig ? { rig, poser } : null;
   const shaped = shapeBody(MODELS[name], shapeValues[name]);
   const next = createHumanRig(MODELS[name], shaped);
-  bodyHeight = buildHuman(next, MODELS[name], shaped).height; // what you see (also sets the standing rest pose)
+  const body = buildHuman(next, MODELS[name], shaped); // what you see (also sets the standing rest pose)
+  bodyHeight = body.height;
+  jiggle = new Jiggle(next, body.mesh, MODELS[name]); // needs the standing rest pose
+  jiggle.setAmounts(softness(name, shapeValues[name]));
   const nextPoser = new Poser(next);
   if (old) {
     transferPose(old.rig, next);
@@ -91,6 +105,8 @@ function loadModel(name) {
   }
   rig = next;
   poser = nextPoser;
+  rig.update();
+  jiggle.settle();
   modelName = name;
   scene.add(rig.root);
   meshes = buildProxies(rig);
@@ -222,6 +238,7 @@ function pushUndo() {
 }
 function afterJump() {
   rig.update();
+  jiggle.settle();
   if (skirtOn) skirt.reset();
   refreshButtons();
 }
@@ -538,6 +555,8 @@ function frame(now) {
   }
   controls.update();
   if (skirtOn) skirt.update(dt);
+  rig.root.updateMatrixWorld(true);
+  jiggle.update(dt);
   updateHandles();
   renderer.render(scene, camera);
 

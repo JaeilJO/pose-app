@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { createHumanRig, buildHuman, transferPose, shapeBody, heightOf, heightParam, MODELS } from '../src/human.js';
 import { Poser } from '../src/poser.js';
+import { Jiggle } from '../src/jiggle.js';
 import { hingeAngle } from '../src/ik.js';
 
 let failed = 0;
@@ -104,6 +105,29 @@ for (const m of ['male', 'female']) {
   ok(moved.length === 0, `${m} every body-part slider changes the body${moved.length ? ` (no change: ${moved})` : ''}`);
   const lean = shapeBody(data, { muscle: 1, weight: 0 }).definition, soft = shapeBody(data, { muscle: 0, weight: 1 }).definition;
   ok(lean > soft + 0.5, `${m} muscle definition follows the sliders (${soft.toFixed(2)} → ${lean.toFixed(2)})`);
+}
+{
+  const { rig, body, poser } = fresh('female');
+  const j = new Jiggle(rig, body.mesh, MODELS.female);
+  j.setAmounts({ breast: 1, belly: 0.5 });
+  const run = (sec) => { for (let t = 0; t < sec; t += 1 / 60) { rig.root.updateMatrixWorld(true); j.update(1 / 60); } };
+  run(1);
+  ok(j.out[0].length() < 1e-4, `standing still: no offset (${j.out[0].length().toExponential(1)})`);
+  // jerk the body down 15 cm in one frame: the breasts lag behind, then settle
+  rig.bones.hips.position.y -= 0.15; rig.update();
+  rig.root.updateMatrixWorld(true); j.update(1 / 60);
+  const lag = j.out[0].clone();
+  ok(lag.y > 0.003 && lag.length() <= 0.03 * 1.4 + 1e-6, `quick move: breast trails upward ${(lag.y * 100).toFixed(1)} cm (clamped)`);
+  let peakBack = 0;
+  for (let t = 0; t < 0.4; t += 1 / 60) { rig.root.updateMatrixWorld(true); j.update(1 / 60); peakBack = Math.min(peakBack, j.out[0].y); }
+  ok(peakBack < -0.001, `it wobbles back past rest (${(peakBack * 100).toFixed(1)} cm)`);
+  run(3);
+  ok(j.out[0].length() < 5e-4, 'and settles');
+  // bend forward 90 degrees: gravity now pulls the breasts toward the floor (local forward)
+  rig.bones.spine.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 2)); rig.update();
+  run(3);
+  const sag = j.out[0].clone();
+  ok(sag.y < -0.005, `bent over: breasts hang toward the floor (${(sag.y * 100).toFixed(1)} cm)`);
 }
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);
