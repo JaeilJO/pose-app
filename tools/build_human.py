@@ -518,6 +518,10 @@ def define_mesh(P, amount):
 
 
 P = define_mesh(P, BASE['define'])
+WN = Wu / Wu.sum(1, keepdims=True)
+if POSE is not None:  # bind in the sculpt's pose: its arms hang lower, so less skinning collapse at the shoulders
+    J_REST = J
+    P, J = POSE.apply_joints(P, WN, J_REST)
 
 # top-4 influences, quantized to bytes
 order = np.argsort(-Wu, axis=1)[:, :4]
@@ -619,7 +623,7 @@ detail8 = np.zeros(len(P) + len(LOOP.E), np.int8)
 DETAIL_STEP = 1e-4  # int8 steps of 0.1 mm (+-12.7 mm)
 if SC is not None:
     Wn = Wu / Wu.sum(1, keepdims=True)
-    Ps = LOOP.positions(POSE.apply(P, Wn))  # our body in the sculpt's pose, subdivided
+    Ps = LOOP.positions(P)  # already in the sculpt's pose
     Ns = vertex_normals(Ps, LOOP.T)
     _d, _i = SC.tree.query(Ps)
     _h = ((SC.P[_i] - Ps) * Ns).sum(1)
@@ -725,10 +729,12 @@ for name, (base_u, ends) in SLIDERS.items():
                 params[k] = v
         Vs = shape(**params)
         Ps = define_mesh(make_faceless(Vs[used_c] * SCALE, tris_c, Wu_c, TOPO)[0], params['define'])
+        Js = joints_of(Vs)
+        if POSE is not None:
+            Ps, Js = POSE.apply_joints(Ps, WN, Js)
         dP = np.round((Ps - P) / DELTA_SCALE)
         assert np.abs(dP).max() < 32767
         moved = np.where(np.abs(dP).max(1) >= 2)[0]  # sparse: only vertices that move more than 0.2 mm
-        Js = joints_of(Vs)
         jd = {k: Js[k] - J[k] for k in J if np.abs(Js[k] - J[k]).max() > 1e-5}
         shapes[name][key] = {'i': b64(moved.astype(np.uint16)), 'd': b64(dP[moved].astype(np.int16)), 'j': rnd(jd)}
         print(f'  slider {name}.{key}: {len(moved)} verts')

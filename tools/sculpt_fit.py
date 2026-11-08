@@ -73,6 +73,33 @@ class Pose:
             out += W[:, k:k + 1] * ((X - self.rest_p[b]) @ self.R[b].T + self.p[b])
         return out
 
+    def joints(self, Jrest):
+        """Posed pivots for another body's rest joints (same bone rotations, forward kinematics)."""
+        out = {}
+        for b in ORDER:
+            joint, parent = BONES[b]
+            r = np.array(Jrest[joint])
+            if parent is None:
+                out[b] = r + (self.p[b] - self.rest_p[b])
+            else:
+                pj = np.array(Jrest[BONES[parent][0]])
+                out[b] = out[parent] + self.R[parent] @ (r - pj)
+        return out
+
+    def apply_joints(self, X, W, Jrest):
+        """Pose another body (its own rest joints) with these bone rotations; returns (X, joints)."""
+        piv = self.joints(Jrest)
+        out = np.zeros_like(X)
+        for k, b in enumerate(self.names):
+            r = np.array(Jrest[BONES[b][0]])
+            out += W[:, k:k + 1] * ((X - r) @ self.R[b].T + piv[b])
+        Jp = dict(Jrest)
+        for b, (joint, _) in BONES.items():
+            Jp[joint] = piv[b]
+        for k in Jrest:  # joints that are not bone pivots ride along with their bone (none today)
+            Jp.setdefault(k, Jrest[k])
+        return out, Jp
+
     def blended_rotation(self, W):
         M = np.zeros((len(W), 3, 3))
         for k, b in enumerate(self.names):
