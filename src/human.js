@@ -3,7 +3,7 @@ import male from './assets/human-male.js';
 import female from './assets/human-female.js';
 import { Rig, boneDefsFromJoints } from './rig.js';
 
-// Realistic, faceless figures from MakeHuman CC0 data (see tools/build_human.py).
+// Realistic mannequin figures from MakeHuman CC0 data (see tools/build_human.py).
 export const MODELS = { male, female };
 export const MODEL_NAMES = Object.keys(MODELS);
 
@@ -16,44 +16,116 @@ function decoded(data) {
     const deltas = {};
     for (const [name, ends] of Object.entries(data.shapes)) {
       deltas[name] = {};
-      for (const [end, v] of Object.entries(ends)) deltas[name][end] = { d: new Int16Array(bytes(v.d).buffer), j: v.j };
+      for (const [end, v] of Object.entries(ends)) {
+        deltas[name][end] = { i: new Uint16Array(bytes(v.i).buffer), d: new Int16Array(bytes(v.d).buffer), j: v.j };
+      }
     }
-    const cav = bytes(data.cavity);
-    const colors = new Uint8Array(cav.length * 3);
-    for (let i = 0; i < cav.length; i++) colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = cav[i];
+    const index = new Uint16Array(bytes(data.index).buffer);
+    // unique edges, for the groove (cavity) shading that follows the body shape
+    const seen = new Set();
+    const edges = [];
+    for (let t = 0; t < index.length; t += 3) {
+      for (let k = 0; k < 3; k++) {
+        const a = index[t + k], b = index[t + ((k + 1) % 3)];
+        const key = a < b ? a * 65536 + b : b * 65536 + a;
+        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
+      }
+    }
     cache.set(data, {
       base: new Float32Array(bytes(data.positions).buffer),
-      index: new Uint16Array(bytes(data.index).buffer),
+      index,
+      edges: Uint16Array.from(edges),
       skinIndex: bytes(data.skinIndex),
       skinWeight: bytes(data.skinWeight),
-      colors,
+      ao: bytes(data.ao),
       deltas,
     });
   }
   return cache.get(data);
 }
 
+// Slider value -> weight of its low or high end shape.
+function endWeight(v, b) {
+  if (v < b - 1e-4) return ['lo', (b - v) / b];
+  if (v > b + 1e-4) return ['hi', (v - b) / (1 - b)];
+  return [null, 0];
+}
+
 /**
- * Body shape from slider values (0..1 for height, weight = body fat, muscle).
- * Each slider blends toward the shape baked at its low or high end.
+ * Body shape from slider values (0..1). Each slider blends toward the shape baked at its
+ * low or high end: height, weight (body fat), muscle, and the body parts (chest, belly, ...).
+ * Also returns how defined the muscles should look (lean + muscular = strong grooves).
  */
 export function shapeBody(data, values = {}) {
   const dec = decoded(data);
   const positions = Float32Array.from(dec.base);
   const joints = Object.fromEntries(Object.entries(data.joints).map(([k, v]) => [k, [...v]]));
+  let definition = data.definition.base;
   for (const [name, b] of Object.entries(data.shapeBase)) {
-    const v = values[name] ?? b;
-    let end = null;
-    let w = 0;
-    if (v < b - 1e-4) { end = 'lo'; w = (b - v) / b; }
-    else if (v > b + 1e-4) { end = 'hi'; w = (v - b) / (1 - b); }
+    const [end, w] = endWeight(values[name] ?? b, b);
     const delta = end && dec.deltas[name][end];
     if (!delta) continue;
     const s = w * data.deltaScale;
-    for (let i = 0; i < positions.length; i++) positions[i] += delta.d[i] * s;
-    for (const k in joints) for (let c = 0; c < 3; c++) joints[k][c] += delta.j[k][c] * w;
+    const { i: idx, d } = delta;
+    for (let k = 0; k < idx.length; k++) {
+      const o = idx[k] * 3;
+      positions[o] += d[k * 3] * s;
+      positions[o + 1] += d[k * 3 + 1] * s;
+      positions[o + 2] += d[k * 3 + 2] * s;
+    }
+    for (const k in delta.j) for (let c = 0; c < 3; c++) joints[k][c] += delta.j[k][c] * w;
+    if (data.definition[name]) definition += data.definition[name][end] * w;
   }
-  return { positions, joints };
+  return { positions, joints, definition: Math.min(1.3, Math.max(0, definition)) };
+}
+
+// Vertex shading baked into colors: ambient occlusion (fixed) x grooves between muscles,
+// measured on the current shape and deepened with muscle definition.
+function shadeColors(dec, P, definition) {
+  const n = P.length / 3;
+  const N = new Float32Array(n * 3);
+  const idx = dec.index;
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const o of [a, b, c]) { N[o] += nx; N[o + 1] += ny; N[o + 2] += nz; }
+  }
+  const sum = new Float32Array(n * 3), cnt = new Float32Array(n), len = new Float32Array(n);
+  const E = dec.edges;
+  for (let e = 0; e < E.length; e += 2) {
+    const a = E[e] * 3, b = E[e + 1] * 3;
+    const l = Math.hypot(P[a] - P[b], P[a + 1] - P[b + 1], P[a + 2] - P[b + 2]);
+    for (let c = 0; c < 3; c++) { sum[a + c] += P[b + c]; sum[b + c] += P[a + c]; }
+    cnt[E[e]]++; cnt[E[e + 1]]++; len[E[e]] += l; len[E[e + 1]] += l;
+  }
+  let curv = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const o = i * 3;
+    const nl = Math.hypot(N[o], N[o + 1], N[o + 2]) || 1;
+    let d = 0;
+    for (let c = 0; c < 3; c++) d += (sum[o + c] / cnt[i] - P[o + c]) * (N[o + c] / nl);
+    curv[i] = d / (len[i] / cnt[i] + 1e-9); // > 0 in grooves
+  }
+  for (let pass = 0; pass < 4; pass++) {
+    const acc = new Float32Array(n);
+    for (let e = 0; e < E.length; e += 2) { acc[E[e]] += curv[E[e + 1]]; acc[E[e + 1]] += curv[E[e]]; }
+    const next = new Float32Array(n);
+    for (let i = 0; i < n; i++) next[i] = 0.5 * curv[i] + (0.5 * acc[i]) / cnt[i];
+    curv = next;
+  }
+  const sorted = Float32Array.from(curv).sort();
+  const p97 = sorted[Math.floor(n * 0.97)] + 1e-9;
+  const strength = 0.16 + 0.34 * definition;
+  const colors = new Uint8Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const cav = 1 - strength * Math.min(1, Math.max(0, curv[i] / p97));
+    const ao = dec.ao[i] / 255;
+    const v = Math.round(255 * cav * (1 - 0.62 * Math.pow(1 - ao, 1.2)));
+    colors[i * 3] = colors[i * 3 + 1] = colors[i * 3 + 2] = v;
+  }
+  return colors;
 }
 
 // Standing height (m) for a height-slider value. Offsets blend linearly, so each half is a straight line.
@@ -93,8 +165,8 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   g.setIndex(new THREE.BufferAttribute(dec.index, 1));
   g.setAttribute('skinIndex', new THREE.BufferAttribute(dec.skinIndex, 4));
   g.setAttribute('skinWeight', new THREE.BufferAttribute(dec.skinWeight, 4, true));
-  // Grooves between muscles are pre-darkened (cavity map baked in tools/build_human.py).
-  g.setAttribute('color', new THREE.BufferAttribute(dec.colors, 3, true));
+  // AO (baked) x grooves between muscles (measured on this shape, deeper when lean and muscular).
+  g.setAttribute('color', new THREE.BufferAttribute(shadeColors(dec, shaped.positions, shaped.definition), 3, true));
   g.computeVertexNormals();
 
   // Matte sculpting clay: soft highlights, a little velvet on the edges; AO and grooves come from vertex colors.

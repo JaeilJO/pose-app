@@ -89,5 +89,21 @@ for (const m of ['male', 'female']) {
   transferPose(short.rig, tall.rig);
   ok(Math.abs(hingeAngle(short.rig.bones['shin.L']) - hingeAngle(tall.rig.bones['shin.L'])) < 0.05 && tall.rig.worldPos('foot.L').y < 0.15, `${m} pose survives a height change`);
 }
+for (const m of ['male', 'female']) {
+  const data = MODELS[m];
+  const base = shapeBody(data).positions;
+  const moved = [];
+  for (const k of ['shoulders', 'chest', 'arms', 'belly', 'hips', 'thighs', 'calves']) {
+    for (const v of [0, 1]) {
+      const p = shapeBody(data, { [k]: v }).positions;
+      let mx = 0;
+      for (let i = 0; i < p.length; i++) mx = Math.max(mx, Math.abs(p[i] - base[i]));
+      if (mx < 0.005) moved.push(`${k}=${v}`);
+    }
+  }
+  ok(moved.length === 0, `${m} every body-part slider changes the body${moved.length ? ` (no change: ${moved})` : ''}`);
+  const lean = shapeBody(data, { muscle: 1, weight: 0 }).definition, soft = shapeBody(data, { muscle: 0, weight: 1 }).definition;
+  ok(lean > soft + 0.5, `${m} muscle definition follows the sliders (${soft.toFixed(2)} → ${lean.toFixed(2)})`);
+}
 console.log(failed ? `\n${failed} check(s) failed` : '\nAll checks passed');
 process.exit(failed ? 1 : 0);

@@ -20,7 +20,8 @@ SCALE = 0.1  # MakeHuman units are decimeters
 
 PRESETS = {
     'male': dict(  # athletic adult male
-        gender=1.0, muscle=1.0, weight=0.2, proportions=0.8,
+        gender=1.0, muscle=1.0, weight=0.2, proportions=0.8, muscle_u=0.6, define=0.55,
+        extra={'stomach/stomach-tone-incr.target': 0.6},
         detail={
             'torso/torso-muscle-pectoral-incr.target': 0.75,
             'torso/torso-muscle-dorsi-incr.target': 0.6,
@@ -32,7 +33,8 @@ PRESETS = {
             'armslegs/l-lowerleg-muscle-incr.target': 0.6, 'armslegs/r-lowerleg-muscle-incr.target': 0.6,
         }),
     'female': dict(  # fit adult female
-        gender=0.0, muscle=0.72, weight=0.38, proportions=0.8,
+        gender=0.0, muscle=0.72, weight=0.38, proportions=0.8, muscle_u=0.45, define=0.3,
+        extra={'stomach/stomach-tone-incr.target': 0.25},
         detail={
             'torso/torso-muscle-dorsi-incr.target': 0.2,
             'armslegs/l-upperarm-muscle-incr.target': 0.3, 'armslegs/r-upperarm-muscle-incr.target': 0.3,
@@ -74,13 +76,14 @@ def split(v):
     return {'min': (0.5 - v) * 2, 'average': v * 2}
 
 
-def shape(gender, muscle, weight, height, proportions, detail, base_muscle):
-    """Base mesh + MakeHuman macro targets (+ extra muscle detail scaled with the muscle slider)."""
+def shape(gender, muscle, weight, height, proportions, detail_k=1.0, extra=None, cup=0.0, **_):
+    """Base mesh + MakeHuman macro targets + the preset's muscle detail (scaled by detail_k)
+    + extra targets {path: weight}; cup in [-1, 1] blends female breast size."""
     V = V_BASE.copy()
 
     def apply(path, w):
         t = target(path)
-        if w > 1e-6 and t is not None:
+        if abs(w) > 1e-6 and t is not None:
             V[t[:, 0].astype(int)] += w * t[:, 1:4]
 
     genders = {'male': gender, 'female': 1 - gender}
@@ -93,16 +96,20 @@ def shape(gender, muscle, weight, height, proportions, detail, base_muscle):
                 for h, hw_ in split(height).items():
                     if h != 'average':
                         apply(f'macrodetails/height/{g}-young-{m}muscle-{wt}weight-{h}height.target', w * hw_)
+                if g == 'female' and abs(cup) > 1e-6:
+                    apply(f'breast/female-young-{m}muscle-{wt}weight-{"max" if cup > 0 else "min"}cup-averagefirmness.target', w * abs(cup))
         for race, rw in RACES.items():
             apply(f'macrodetails/{race}-{g}-young.target', gw * rw)
-    k = np.clip(muscle / base_muscle, 0, 1.6)
-    for path, w in detail.items():
-        apply(path, w * k)
+    for path, w in DETAIL.items():
+        apply(path, w * detail_k)
+    for path, w in (extra or {}).items():
+        apply(path, w)
     return V
 
 
-BASE = dict(gender=GENDER, muscle=MUSCLE, weight=WEIGHT, height=0.5, proportions=PROPORTIONS)
-V = shape(**BASE, detail=DETAIL, base_muscle=MUSCLE)
+BASE = dict(gender=GENDER, muscle=MUSCLE, weight=WEIGHT, height=0.5, proportions=PROPORTIONS, detail_k=1.0,
+            extra=dict(cfg.get('extra', {})), cup=0.0, define=cfg['define'])
+V = shape(**BASE)
 
 # ---------------- joints ----------------
 skel = json.load(open(f'{MH}/rigs/default.mhskel'))
@@ -254,10 +261,43 @@ def ray_hits(O, D, P, T, maxd=0.06, eps=1e-4):
     return hit
 
 
+import os
+FACE = dict(nose_its=2, nose_gain=1.2, nose_r=0.013, eye_its=200, mouth_its=8, coarse_its=20, sock_depth=0.01, sock_up=0.006,
+            bulge=0.003, eye_relax=60, dscale=1.0, tangent_its=20, eye_gain=1.0, eye_zero=0.0)
+FACE.update({k: type(FACE[k])(v) for k, v in (a.split('=') for a in os.environ.get('FACE', '').split(',') if a)})
 FEATURE_BONES = ('eye', 'levator', 'oculi', 'orbicularis', 'oris', 'risorius', 'special', 'tongue')
 
 
+def cap_points(P, loops, caps):
+    """Positions of the cap vertices: each ring lerps its loop vertex toward the loop centre."""
+    out = [np.zeros((0, 3))]
+    for li, j, f in caps:
+        c = P[loops[li]].mean(0)
+        out.append((c if j < 0 else P[loops[li][j]] * (1 - f) + c * f)[None])
+    return np.vstack(out)
+
+
 def make_faceless(P, tris, Wu, topo=None):
+    """See _faceless. On the first (topology-building) call, triangles that end up folded over
+    (lid corners tucked into the socket) are removed with the cavity and the face is rebuilt."""
+    if topo is not None:
+        return _faceless(P, tris, Wu, topo)
+    interior = None
+    for _ in range(int(os.environ.get('FOLD_PASSES', '1'))):
+        Pf, Tf, Wf, topo = _faceless(P, tris, Wu, None, interior)
+        fn = np.cross(Pf[Tf[:, 1]] - Pf[Tf[:, 0]], Pf[Tf[:, 2]] - Pf[Tf[:, 0]])
+        flip = (fn * vertex_normals(Pf, Tf)[Tf].mean(1)).sum(1) < 0
+        bad = topo['used'][np.unique(Tf[flip])]
+        bad = bad[bad < len(P)]
+        if not len(bad):
+            break
+        interior = topo['interior'].copy()
+        interior[bad] = True
+        print(f'  folded verts removed: {len(bad)}')
+    return Pf, Tf, Wf, topo
+
+
+def _faceless(P, tris, Wu, topo=None, interior=None):
     """Mannequin face on the real MakeHuman head: skull, jaw, cheekbones and ears stay; the eye
     sockets and mouth cavity are removed and capped, then the face is faired (bilaplacian) and a
     heavily smoothed copy of the original features is added back, leaving soft brow, nose and lips."""
@@ -273,26 +313,41 @@ def make_faceless(P, tris, Wu, topo=None):
         N = vertex_normals(P, tris)
         c0 = P[cand].mean(0)
         near = tris[np.abs(P[tris].mean(1) - c0).max(1) < 0.2]
-        interior = np.zeros(n, bool)
-        interior[cand[ray_hits(P[cand] + N[cand] * 2e-4, N[cand], P, near)]] = True  # inside eye sockets / mouth
+        if interior is None:
+            interior = np.zeros(n, bool)
+            interior[cand[ray_hits(P[cand] + N[cand] * 2e-4, N[cand], P, near)]] = True  # inside eye sockets / mouth
         kept = largest_component(tris[~interior[tris].any(1)], n)
         loops = boundary_loops(kept)
-        fill = []
-        for k, L in enumerate(loops):
-            for j in range(len(L)):
-                fill.append((L[(j + 1) % len(L)], L[j], n + k))
+        # cap each opening with concentric rings
+        fill, caps = [], []  # caps: (loop index, vertex in loop or -1 for the centre, lerp toward centre)
+        for li, L in enumerate(loops):
+            m_ = len(L)
+            rings = max(1, min(4, m_ // 8))
+            prev = list(L)
+            for r in range(1, rings + 1):
+                cur = list(range(n + len(caps), n + len(caps) + m_))
+                caps += [(li, j, r / (rings + 1)) for j in range(m_)]
+                for j in range(m_):
+                    a, b, c, d = prev[j], prev[(j + 1) % m_], cur[(j + 1) % m_], cur[j]
+                    fill += [(b, a, d), (b, d, c)]
+                prev = cur
+            ci = n + len(caps)
+            caps.append((li, -1, 1.0))
+            for j in range(m_):
+                fill.append((prev[(j + 1) % m_], prev[j], ci))
         T2 = np.vstack([kept, np.array(fill)])
-        n2 = n + len(loops)
+        n2 = n + len(caps)
         used = np.unique(T2)
         # face region: an ellipse spanning brow to lower lip, sized from the eye and mouth openings
         cen = np.array([P[L].mean(0) for L in loops])
-        eyes = [k for k in range(len(loops)) if abs(cen[k, 0]) > 0.02 and cen[k, 2] > 0.1]
+        side = lambda sg: [k for k in range(len(loops)) if sg * cen[k, 0] > 0.02 and cen[k, 2] > 0.1]
+        eyes = [max(side(sg), key=lambda k: len(loops[k])) for sg in (1, -1)]  # the big opening on each side
         mouth = max((k for k in range(len(loops)) if abs(cen[k, 0]) < 0.005), key=lambda k: len(loops[k]))
         ye, ym = cen[eyes, 1].mean(), cen[mouth, 1]
         xe = np.abs(cen[eyes, 0]).mean()
         cy, ry, rx, zmin = (ye + ym) / 2 + 0.13 * (ye - ym), 1.03 * (ye - ym), 2.06 * xe, cen[mouth, 2] - 0.065
-        P2 = np.vstack([P, cen])
-        hw = np.r_[Wu[:, IDX['head']] / Wu.sum(1), np.ones(len(loops))]
+        P2 = np.vstack([P, cap_points(P, loops, caps)])
+        hw = np.r_[Wu[:, IDX['head']] / Wu.sum(1), np.ones(len(caps))]
         e = (P2[:, 0] / rx) ** 2 + ((P2[:, 1] - cy) / ry) ** 2
         region = (e < 1) & (P2[:, 2] > zmin) & (hw > 0.5)
         region[n:] = True
@@ -310,21 +365,53 @@ def make_faceless(P, tris, Wu, topo=None):
         band |= (A @ band.astype(float) > 0)
         remap = -np.ones(n2, dtype=np.int64)
         remap[used] = np.arange(len(used))
+        # where to keep more of the real face: nose (raised), closed eyelids, soft lips; sockets under the brow
+        nostrils = [k for k in range(len(loops)) if 0.004 < abs(cen[k, 0]) < 0.02 and cen[k, 2] > 0.1 and cen[k, 1] < ye - 0.02]
+        yn = cen[nostrils, 1].mean() if nostrils else ym + 0.3 * (ye - ym)
+        x, y = P2[:, 0], P2[:, 1]
+        t_ = np.clip((ye - 0.004 - y) / (ye - 0.004 - (yn + 0.004)), 0, 1)
+        d_nose = np.hypot(x, y - (ye - 0.004 + t_ * ((yn + 0.004) - (ye - 0.004))))
+        m_nose = np.exp(-(d_nose / FACE['nose_r']) ** 2) * (y > yn - 0.012) * (y < ye + 0.006)
+        m_eye = np.max([np.exp(-(((x - cen[k, 0]) / 0.021) ** 2 + ((y - cen[k, 1]) / 0.012) ** 2)) for k in eyes], axis=0)
+        m_mouth = np.exp(-((x / 0.028) ** 2 + ((y - ym) / 0.013) ** 2))
+        m_sock = np.max([np.exp(-(((x - cen[k, 0]) / 0.017) ** 2 + ((y - cen[k, 1] - FACE['sock_up']) / 0.0105) ** 2)) for k in eyes], axis=0)
+        m_nose = m_nose * (1 - m_eye) ** 2  # keep the eye corners out of the nose detail
+        m_ball = np.max([np.exp(-(((x - cen[k, 0]) / 0.012) ** 2 + ((y - cen[k, 1]) / 0.010) ** 2)) for k in eyes], axis=0)
+        masks = {k: v * region for k, v in dict(nose=m_nose, eye=m_eye, mouth=m_mouth, sock=m_sock, ball=m_ball).items()}
         topo = dict(loops=loops, T2=T2, A=A, deg=deg, free=free, fixed=fixed, Mfc=M[free][:, fixed],
                     solve=spla.factorized(M[free][:, free].tocsc()), region=region, w=w, band=band,
-                    used=used, remap=remap)
+                    used=used, remap=remap, masks=masks, caps=caps, interior=interior)
         print(f'mannequin face: removed {interior.sum()} cavity verts, capped {len(loops)} openings, faired {len(free)} verts')
     t = topo
-    P2 = np.vstack([P, [P[L].mean(0) for L in t['loops']]])
-    W2 = np.vstack([Wu, [Wu[L].mean(0) for L in t['loops']]])
+    P2 = np.vstack([P, cap_points(P, t['loops'], t['caps'])])
+    W2 = np.vstack([Wu] + [Wu[t['loops'][li]].mean(0)[None] for li, _, _ in t['caps']])
     F = P2.copy()
     for c in range(3):
         F[t['free'], c] = t['solve'](-t['Mfc'] @ P2[t['fixed'], c])
-    D = P2 - F
-    D[~t['region']] = 0
-    for _ in range(20):  # keep only the broad forms of the original features
-        D = (t['A'] @ D) / t['deg'][:, None] * t['region'][:, None]
-    P2 = P2 + t['w'][:, None] * (F + D - P2)
+    D0 = P2 - F
+    D0[~t['region']] = 0
+    if FACE['eye_zero'] > 0:  # drop the lids entirely; the eye area is rebuilt from the faired surface + a socket
+        D0[t['masks']['eye'] > FACE['eye_zero']] = 0
+
+    def soften(D, its):
+        for _ in range(its):
+            D = (t['A'] @ D) / t['deg'][:, None] * t['region'][:, None]
+        return D
+    mk = t['masks']
+    D = soften(D0, FACE['coarse_its'])  # broad forms everywhere
+    for name, its, gain in (('mouth', FACE['mouth_its'], 1.0), ('eye', FACE['eye_its'], FACE['eye_gain']), ('nose', FACE['nose_its'], FACE['nose_gain'])):
+        D = D + mk[name][:, None] * (gain * soften(D0, its) - D)
+    Q = F + FACE['dscale'] * D
+    relax = np.clip(mk['eye'] * 2, 0, 1)[:, None] * 0.5
+    for _ in range(FACE['eye_relax']):  # untangle the closed lids
+        Q += relax * ((t['A'] @ Q) / t['deg'][:, None] - Q)
+    Q -= (FACE['sock_depth'] * mk['sock'] - FACE['bulge'] * mk['ball'])[:, None] * vertex_normals(Q, t['T2'])  # sockets under the brow, round lids
+    tw = (t['region'] * 0.5)[:, None]
+    for _ in range(FACE['tangent_its']):  # spread vertices the fairing bunched up, without changing the shape
+        Nq = vertex_normals(Q, t['T2'])
+        lap = (t['A'] @ Q) / t['deg'][:, None] - Q
+        Q += tw * (lap - (lap * Nq).sum(1, keepdims=True) * Nq)
+    P2 = P2 + t['w'][:, None] * (Q - P2)
     for _ in range(3):  # melt the seam where the faired patch meets the head
         avg = (t['A'] @ P2) / t['deg'][:, None]
         P2[t['band']] += 0.5 * (avg[t['band']] - P2[t['band']])
@@ -351,6 +438,34 @@ Wu[Wu.sum(1) < 1e-6, IDX['head']] = 1  # unweighted helper verts (eyeballs) ride
 tris_c, used_c, Wu_c = tris, used, Wu.copy()
 
 P, tris, Wu, TOPO = make_faceless(P, tris_c, Wu_c)
+
+# ---------------- muscle definition: deepen grooves between muscles, firm up the bulges ----------------
+_E = np.unique(np.sort(np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]]), 1), axis=0)
+ADJ = sp.coo_matrix((np.ones(2 * len(_E)), (np.r_[_E[:, 0], _E[:, 1]], np.r_[_E[:, 1], _E[:, 0]])), shape=(len(P), len(P))).tocsr()
+ADJ_DEG = np.maximum(np.asarray(ADJ.sum(1)).ravel(), 1)
+_skip = Wu[:, [IDX[b] for b in ('head', 'hand.L', 'hand.R', 'foot.L', 'foot.R')]].sum(1) + 0.6 * Wu[:, IDX['neck']]
+DEF_MASK = np.clip(1 - _skip / Wu.sum(1), 0, 1)
+for _ in range(4):
+    DEF_MASK = (ADJ @ DEF_MASK) / ADJ_DEG
+
+
+def define_mesh(P, amount):
+    """Band-pass sharpen along the normals: muscle-sized bumps and grooves get stronger,
+    the overall roundness of limbs and torso stays as it is."""
+    if amount <= 0:
+        return P
+    N = vertex_normals(P, tris)
+    Ps = P.copy()
+    for _ in range(10):
+        Ps = 0.5 * Ps + 0.5 * (ADJ @ Ps) / ADJ_DEG[:, None]
+    h = ((P - Ps) * N).sum(1)
+    hl = h.copy()
+    for _ in range(30):
+        hl = 0.5 * hl + 0.5 * (ADJ @ hl) / ADJ_DEG
+    return P + (amount * DEF_MASK * (h - hl))[:, None] * N
+
+
+P = define_mesh(P, BASE['define'])
 
 # top-4 influences, quantized to bytes
 order = np.argsort(-Wu, axis=1)[:, :4]
@@ -436,34 +551,77 @@ def bake_ao(P, tris, N, rays=96, reach=0.22, seed=7):
     return 1 - occl
 
 
-ao = bake_ao(P, tris, N)
+ao = bake_ao(P, tris, N) if not os.environ.get('NO_AO') else np.ones(len(P))
 for _ in range(2):  # soften ray noise
     s_ = np.zeros(n_v); np.add.at(s_, edges[:, 0], ao[edges[:, 1]]); np.add.at(s_, edges[:, 1], ao[edges[:, 0]])
     ao = 0.5 * ao + 0.5 * s_ / cnt
-shade = cavity * (1 - 0.62 * (1 - ao) ** 1.2)
 print(f'ao: mean {ao.mean():.2f}, min {ao.min():.2f}')
-cavity = np.round(np.clip(shade, 0, 1) * 255).astype(np.uint8)
+ao8 = np.round(np.clip(ao, 0, 1) * 255).astype(np.uint8)
 
 b64 = lambda a: base64.b64encode(a.tobytes()).decode()
 rnd = lambda d: {k: [round(float(x), 5) for x in v] for k, v in d.items()}
 
 # ---------------- body-shape sliders: offsets at each slider's ends ----------------
-SLIDERS = ('height', 'weight', 'muscle')
+def both(part, w):
+    return {f'armslegs/{side}-{part}.target': w for side in ('l', 'r')}
+
+
+def pair(incr, decr):
+    """Part slider: decr targets at 0, incr targets at 1."""
+    return {'lo': dict(extra=decr), 'hi': dict(extra=incr)}
+
+
+MALE = PRESET == 'male'
+SLIDERS = {
+    'height': (0.5, {'lo': dict(height=0.0), 'hi': dict(height=1.0)}),
+    'weight': (WEIGHT, {'lo': dict(weight=0.0, define=+0.2),
+                        'hi': dict(weight=1.0, define=-BASE['define'], detail_k=0.5,
+                                   extra={'stomach/stomach-tone-incr.target': 0.0, 'stomach/stomach-pregnant-incr.target': 0.35,
+                                          **both('upperarm-fat-incr', 0.6), **both('upperleg-fat-incr', 0.5)})}),
+    'muscle': (cfg['muscle_u'], {
+        'lo': dict(muscle=0.0, detail_k=0.0, define=-BASE['define'], extra={'stomach/stomach-tone-decr.target': 0.4}),
+        'hi': dict(muscle=1.0, detail_k=1.45 if MALE else 2.0, define=+0.3,
+                   extra={'stomach/stomach-tone-incr.target': 1.0, 'torso/torso-vshape-incr.target': 0.4})}),
+    'shoulders': (0.5, pair({**both('upperarm-shoulder-muscle-incr', 1.0), 'torso/torso-vshape-incr.target': 0.5},
+                            {**both('upperarm-shoulder-muscle-decr', 1.0), 'torso/torso-vshape-decr.target': 0.5})),
+    'chest': (0.5, pair({'torso/torso-muscle-pectoral-incr.target': 1.0}, {'torso/torso-muscle-pectoral-decr.target': 1.0})
+              if MALE else {'lo': dict(cup=-0.8), 'hi': dict(cup=1.0)}),
+    'arms': (0.5, pair({**both('upperarm-muscle-incr', 0.9), **both('upperarm-fat-incr', 0.5), **both('lowerarm-muscle-incr', 0.7)},
+                       {**both('upperarm-muscle-decr', 0.9), **both('upperarm-fat-decr', 0.5), **both('lowerarm-muscle-decr', 0.7)})),
+    'belly': (0.5, pair({'stomach/stomach-pregnant-incr.target': 0.6}, {'stomach/stomach-pregnant-decr.target': 1.0})),
+    'hips': (0.5, pair({'buttocks/buttocks-volume-incr.target': 1.0, 'hip/hip-scale-horiz-incr.target': 0.4},
+                       {'buttocks/buttocks-volume-decr.target': 1.0, 'hip/hip-scale-horiz-decr.target': 0.4})),
+    'thighs': (0.5, pair({**both('upperleg-muscle-incr', 0.8), **both('upperleg-fat-incr', 0.8)},
+                         {**both('upperleg-muscle-decr', 0.8), **both('upperleg-fat-decr', 0.8)})),
+    'calves': (0.5, pair({**both('lowerleg-muscle-incr', 0.9), **both('lowerleg-fat-incr', 0.5)},
+                         {**both('lowerleg-muscle-decr', 0.9), **both('lowerleg-fat-decr', 0.5)})),
+}
 DELTA_SCALE = 1e-4  # int16 steps of 0.1 mm
 shapes = {}
-for name in SLIDERS:
+for name, (base_u, ends) in SLIDERS.items():
     shapes[name] = {}
-    for end, key in ((0.0, 'lo'), (1.0, 'hi')):
-        if abs(BASE[name] - end) < 1e-6:
-            continue
-        params = dict(BASE, **{name: end})
-        Vs = shape(**params, detail=DETAIL, base_muscle=MUSCLE)
-        Ps = make_faceless(Vs[used_c] * SCALE, tris_c, Wu_c, TOPO)[0]
+    for key, spec in ends.items():
+        params = dict(BASE)
+        for k, v in spec.items():
+            if k == 'extra':
+                params['extra'] = {**BASE['extra'], **v}
+                for path in v:  # an incr target replaces the base amount of the same target
+                    if path in BASE['extra']:
+                        params['extra'][path] = v[path]
+            elif k == 'define':
+                params['define'] = BASE['define'] + v
+            else:
+                params[k] = v
+        Vs = shape(**params)
+        Ps = define_mesh(make_faceless(Vs[used_c] * SCALE, tris_c, Wu_c, TOPO)[0], params['define'])
         dP = np.round((Ps - P) / DELTA_SCALE)
         assert np.abs(dP).max() < 32767
+        moved = np.where(np.abs(dP).max(1) >= 2)[0]  # sparse: only vertices that move more than 0.2 mm
         Js = joints_of(Vs)
-        shapes[name][key] = {'d': b64(dP.astype(np.int16)), 'j': rnd({k: Js[k] - J[k] for k in J})}
-shape_base = {name: BASE[name] for name in SLIDERS}
+        jd = {k: Js[k] - J[k] for k in J if np.abs(Js[k] - J[k]).max() > 1e-5}
+        shapes[name][key] = {'i': b64(moved.astype(np.uint16)), 'd': b64(dP[moved].astype(np.int16)), 'j': rnd(jd)}
+        print(f'  slider {name}.{key}: {len(moved)} verts')
+shape_base = {name: base_u for name, (base_u, _) in SLIDERS.items()}
 
 out = (
     '// Generated by tools/build_human.py from MakeHuman CC0 data. Do not edit by hand.\n'
@@ -475,7 +633,8 @@ out = (
     f'  index: "{b64(tris.astype(np.uint16).ravel())}",\n'
     f'  skinIndex: "{b64(skin_index.ravel())}",\n'
     f'  skinWeight: "{b64(skin_weight.ravel())}",\n'
-    f'  cavity: "{b64(cavity)}",\n'
+    f'  ao: "{b64(ao8)}",\n'
+    f'  definition: {json.dumps({"base": BASE["define"], **{k: {e: SLIDERS[k][1][e].get("define", 0) for e in ("lo", "hi")} for k in ("weight", "muscle")}})},\n'
     f'  shapeBase: {json.dumps(shape_base)},\n'
     f'  deltaScale: {DELTA_SCALE},\n'
     f'  shapes: {json.dumps(shapes)},\n'

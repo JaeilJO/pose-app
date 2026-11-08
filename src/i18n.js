@@ -11,6 +11,7 @@ export const STRINGS = {
     views: ['3/4', 'Front', 'Side', 'Back'],
     body: 'Body', models: { male: 'Male', female: 'Female' },
     height: 'Height', fat: 'Body fat', muscle: 'Muscle', resetShape: 'Reset body',
+    overall: 'Overall', parts: 'Body parts', shoulders: 'Shoulders', chest: 'Chest', arms: 'Arms', belly: 'Belly', hips: 'Hips', thighs: 'Thighs', calves: 'Calves',
   },
   es: {
     title: 'Prototipo de poses',
@@ -24,6 +25,7 @@ export const STRINGS = {
     views: ['3/4', 'Frente', 'Lado', 'Espalda'],
     body: 'Cuerpo', models: { male: 'Hombre', female: 'Mujer' },
     height: 'Altura', fat: 'Grasa', muscle: 'Músculo', resetShape: 'Restablecer cuerpo',
+    overall: 'General', parts: 'Partes', shoulders: 'Hombros', chest: 'Pecho', arms: 'Brazos', belly: 'Vientre', hips: 'Caderas', thighs: 'Muslos', calves: 'Pantorrillas',
   },
   pt: {
     title: 'Protótipo de poses',
@@ -37,6 +39,7 @@ export const STRINGS = {
     views: ['3/4', 'Frente', 'Lado', 'Costas'],
     body: 'Corpo', models: { male: 'Homem', female: 'Mulher' },
     height: 'Altura', fat: 'Gordura', muscle: 'Músculo', resetShape: 'Redefinir corpo',
+    overall: 'Geral', parts: 'Partes', shoulders: 'Ombros', chest: 'Peito', arms: 'Braços', belly: 'Barriga', hips: 'Quadris', thighs: 'Coxas', calves: 'Panturrilhas',
   },
   ko: {
     title: '포즈 프로토타입',
@@ -50,6 +53,7 @@ export const STRINGS = {
     views: ['3/4', '정면', '측면', '뒤'],
     body: '체형', models: { male: '남성', female: '여성' },
     height: '키', fat: '체지방', muscle: '근육', resetShape: '체형 초기화',
+    overall: '전체', parts: '부위', shoulders: '어깨', chest: '가슴', arms: '팔', belly: '배', hips: '엉덩이', thighs: '허벅지', calves: '종아리',
   },
 };
 

@@ -400,7 +400,8 @@ window.addEventListener('keydown', (e) => {
 });
 
 // ---------- body panel: model + shape sliders ----------
-const SHAPE_KEYS = ['height', 'weight', 'muscle'];
+const PART_KEYS = ['shoulders', 'chest', 'arms', 'belly', 'hips', 'thighs', 'calves'];
+const SHAPE_KEYS = ['height', 'weight', 'muscle', ...PART_KEYS];
 let rebuildQueued = false;
 
 function switchModel(name) {
@@ -429,6 +430,11 @@ function refreshBodyPanel() {
   for (const k of ['weight', 'muscle']) {
     document.getElementById(`shape-${k}`).value = Math.round(vals[k] * 100);
     document.getElementById(`out-${k}`).textContent = `${Math.round(vals[k] * 100)}`;
+  }
+  for (const k of PART_KEYS) { // centred: 0 is the default, -50..+50
+    const v = Math.round(vals[k] * 100);
+    document.getElementById(`shape-${k}`).value = v;
+    document.getElementById(`out-${k}`).textContent = v === 50 ? '0' : `${v > 50 ? '+' : '−'}${Math.abs(v - 50)}`;
   }
 }
 
