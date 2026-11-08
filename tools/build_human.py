@@ -10,17 +10,19 @@ with base64 buffers. MakeHuman's base mesh, targets, skeleton and weights are CC
 """
 import base64
 import json
+import os
 import sys
 
 import numpy as np
 
 MH, OUT = sys.argv[1], sys.argv[2]
 PRESET = sys.argv[3] if len(sys.argv) > 3 else 'male'
+SCULPT = sys.argv[4] if len(sys.argv) > 4 else None  # Blender Studio Human Base Meshes export (npz: co, tris)
 SCALE = 0.1  # MakeHuman units are decimeters
 
 PRESETS = {
     'male': dict(  # athletic adult male
-        gender=1.0, muscle=1.0, weight=0.2, proportions=0.8, muscle_u=0.6, define=0.55,
+        gender=1.0, muscle=1.0, weight=0.2, proportions=0.8, muscle_u=0.6, define=0.0,
         extra={'stomach/stomach-tone-incr.target': 0.6},
         detail={
             'torso/torso-muscle-pectoral-incr.target': 0.75,
@@ -33,7 +35,7 @@ PRESETS = {
             'armslegs/l-lowerleg-muscle-incr.target': 0.6, 'armslegs/r-lowerleg-muscle-incr.target': 0.6,
         }),
     'female': dict(  # fit adult female
-        gender=0.0, muscle=0.72, weight=0.38, proportions=0.8, muscle_u=0.45, define=0.3,
+        gender=0.0, muscle=0.72, weight=0.38, proportions=0.8, muscle_u=0.45, define=0.0,
         extra={'stomach/stomach-tone-incr.target': 0.25},
         detail={
             'torso/torso-muscle-dorsi-incr.target': 0.2,
@@ -104,9 +106,10 @@ def shape(gender, muscle, weight, height, proportions, detail_k=1.0, extra=None,
         apply(path, w * detail_k)
     for path, w in (extra or {}).items():
         apply(path, w)
-    return V
+    return V + FIT
 
 
+FIT = 0.0  # sculpt offset (MakeHuman units), set by the sculpt fit below
 BASE = dict(gender=GENDER, muscle=MUSCLE, weight=WEIGHT, height=0.5, proportions=PROPORTIONS, detail_k=1.0,
             extra=dict(cfg.get('extra', {})), cup=0.0, define=cfg['define'])
 V = shape(**BASE)
@@ -178,6 +181,55 @@ for bone, pairs in json.load(open(f'{MH}/rigs/default_weights.mhw'))['weights'].
     for ours, frac in map_bone(bone).items():
         for vi, w in pairs:
             W[vi, IDX[ours]] += w * frac
+
+# ---------------- shape and surface detail from a sculpt (Blender Studio Human Base Meshes, CC0) ----------------
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sculpt_fit import Sculpt, pose_align, nonrigid_fit, to_rest  # noqa: E402
+import scipy.sparse as sp  # noqa: E402
+import scipy.sparse.linalg as spla  # noqa: E402
+POSE = SC = None
+if SCULPT:
+    _bt = np.array([(f[0], f[k], f[k + 1]) for g, f in faces if g == 'body' for k in range(1, len(f) - 1)])
+    _used = np.unique(_bt)
+    _rm = -np.ones(len(V), dtype=np.int64)
+    _rm[_used] = np.arange(len(_used))
+    _T, _X = _rm[_bt], V[_used] * SCALE
+    _W = W[_used] / np.maximum(W[_used].sum(1, keepdims=True), 1e-9)
+    _W[_W.sum(1) < 1e-6, IDX['head']] = 1
+    _z = np.load(SCULPT)
+    _co = _z['co'].astype(float)
+    SP = np.stack([_co[:, 0], _co[:, 2], -_co[:, 1]], 1)  # Blender Z-up, facing -Y -> Y-up, facing +Z
+    SP[:, 0] -= SP[:, 0].mean()
+    SP *= (_X[:, 1].max() - _X[:, 1].min()) / (SP[:, 1].max() - SP[:, 1].min())  # same height as our body
+    SP[:, 1] += _X[:, 1].min() - SP[:, 1].min()
+    _band = lambda Q: Q[(Q[:, 1] > J['chest'][1] - 0.15) & (Q[:, 1] < J['chest'][1]) & (np.abs(Q[:, 0]) < 0.1)]
+    SP[:, 2] += _band(_X).mean(0)[2] - _band(SP).mean(0)[2]
+    # the sculpt is anatomical at the groin: fair that patch first, so everything taken from it is mannequin-smooth
+    ST = _z['tris'].astype(np.int64)
+    _gy = (J['hip.L'][1] + J['hip.R'][1]) / 2 - float(os.environ.get('GOFF', 0.07))
+    _gz = J['hips'][2] + float(os.environ.get('GZ', 0.04))
+    _e = (SP[:, 0] / float(os.environ.get('GX', 0.075))) ** 2 + ((SP[:, 1] - _gy) / float(os.environ.get('GY', 0.09))) ** 2 + ((SP[:, 2] - _gz) / 0.1) ** 2
+    _free, _fixed = np.where(_e < 1)[0], np.where(_e >= 1)[0]
+    _Lg = __import__('sculpt_fit').laplacian(ST, len(SP))
+    _Lg = (sp.diags(1 / np.maximum(_Lg.diagonal(), 1)) @ _Lg).tocsr()
+    _Lf = _Lg[_free]
+    _M = (_Lf.T @ _Lf).tocsr()  # least-squares bilaplacian on the patch
+    _solve = spla.factorized(_M[_free][:, _free].tocsc())
+    for _c in range(3):
+        SP[_free, _c] = _solve(-(_M[_free][:, _fixed] @ SP[_fixed, _c]))
+    print(f'  sculpt groin faired: {len(_free)} verts')
+    SC = Sculpt(SP, ST)
+    print('sculpt fit:')
+    POSE = pose_align(_X, _T, _W, J, OUR, SC, iterations=8)
+    _Xp = POSE.apply(_X, _W)
+    _hand = _W[:, IDX['hand.L']] + _W[:, IDX['hand.R']]
+    _fit_w = np.clip(1 - _W[:, IDX['head']] - 0.5 * _W[:, IDX['neck']] - _hand, 0, 1)
+    _D = nonrigid_fit(_Xp, _T, SC, _fit_w, 5.0 * np.clip(_W[:, IDX['head']] + _hand, 0, 1))
+    _Xf = _X + to_rest(_D, POSE, _W)
+    FIT = np.zeros_like(V_BASE)
+    FIT[_used] = (_Xf - _X) / SCALE
+    V = shape(**BASE)
+    J = joints_of(V)
 
 # ---------------- faceless head ----------------
 import scipy.sparse as sp
@@ -560,6 +612,29 @@ ao8 = np.round(np.clip(ao, 0, 1) * 255).astype(np.uint8)
 
 b64 = lambda a: base64.b64encode(a.tobytes()).decode()
 
+# ---------------- sculpt surface detail, stored per vertex of the once-subdivided body ----------------
+from subdiv import Loop  # noqa: E402
+LOOP = Loop(tris, len(P))
+detail8 = np.zeros(len(P) + len(LOOP.E), np.int8)
+DETAIL_STEP = 1e-4  # int8 steps of 0.1 mm (+-12.7 mm)
+if SC is not None:
+    Wn = Wu / Wu.sum(1, keepdims=True)
+    Ps = LOOP.positions(POSE.apply(P, Wn))  # our body in the sculpt's pose, subdivided
+    Ns = vertex_normals(Ps, LOOP.T)
+    _d, _i = SC.tree.query(Ps)
+    _h = ((SC.P[_i] - Ps) * Ns).sum(1)
+    _ok = (_d < 0.02) & ((SC.N[_i] * Ns).sum(1) > 0.3)
+    _skip = Wn[:, [IDX[b] for b in ('head', 'hand.L', 'hand.R', 'foot.L', 'foot.R')]].sum(1) + 0.5 * Wn[:, IDX['neck']]
+    _yc = (J['hip.L'][1] + J['hip.R'][1]) / 2 - 0.07  # the sculpt is anatomical at the groin, our figure is not
+    _groin = np.exp(-((P[:, 0] / 0.075) ** 2 + ((P[:, 1] - _yc) / 0.085) ** 2))
+    _keep = np.clip(1 - _skip, 0, 1) * (1 - _groin)
+    for _ in range(3):
+        _keep = np.minimum(_keep, (ADJ @ _keep) / ADJ_DEG)  # fade in, no hard edges
+    _h = np.clip(_h, -0.0125, 0.0125) * LOOP.linear(_keep[:, None])[:, 0] * _ok
+    detail8 = np.round(_h / DETAIL_STEP).astype(np.int8)
+    print(f'sculpt detail: {len(_h)} verts, |h| median {np.median(np.abs(_h[_h != 0])) * 1000:.2f} mm')
+DETAIL_SCALE = {'base': 1.0, 'muscle': {'lo': -0.5, 'hi': 0.35}, 'weight': {'lo': 0.15, 'hi': -0.65}}
+
 # ---------------- soft tissue for jiggle: breasts (MakeHuman breast bones) and belly ----------------
 _wraw = json.load(open(f'{MH}/rigs/default_weights.mhw'))['weights']
 _full = np.zeros((len(V), 2))
@@ -610,13 +685,13 @@ def pair(incr, decr):
 MALE = PRESET == 'male'
 SLIDERS = {
     'height': (0.5, {'lo': dict(height=0.0), 'hi': dict(height=1.0)}),
-    'weight': (WEIGHT, {'lo': dict(weight=0.0, define=+0.2),
+    'weight': (WEIGHT, {'lo': dict(weight=0.0, define=+0.1),
                         'hi': dict(weight=1.0, define=-BASE['define'], detail_k=0.5,
                                    extra={'stomach/stomach-tone-incr.target': 0.0, 'stomach/stomach-pregnant-incr.target': 0.35,
                                           **both('upperarm-fat-incr', 0.6), **both('upperleg-fat-incr', 0.5)})}),
     'muscle': (cfg['muscle_u'], {
-        'lo': dict(muscle=0.0, detail_k=0.0, define=-BASE['define'], extra={'stomach/stomach-tone-decr.target': 0.4}),
-        'hi': dict(muscle=1.0, detail_k=1.45 if MALE else 2.0, define=+0.3,
+        'lo': dict(muscle=0.0, detail_k=0.0, extra={'stomach/stomach-tone-decr.target': 0.4}),
+        'hi': dict(muscle=1.0, detail_k=1.45 if MALE else 2.0, define=+0.25,
                    extra={'stomach/stomach-tone-incr.target': 1.0, 'torso/torso-vshape-incr.target': 0.4})}),
     'shoulders': (0.5, pair({**both('upperarm-shoulder-muscle-incr', 1.0), 'torso/torso-vshape-incr.target': 0.5},
                             {**both('upperarm-shoulder-muscle-decr', 1.0), 'torso/torso-vshape-decr.target': 0.5})),
@@ -671,6 +746,9 @@ out = (
     f'  skinWeight: "{b64(skin_weight.ravel())}",\n'
     f'  ao: "{b64(ao8)}",\n'
     f'  soft: "{b64(soft8)}",\n'
+    f'  detail: "{b64(detail8)}",\n'
+    f'  detailStep: {DETAIL_STEP},\n'
+    f'  detailScale: {json.dumps(DETAIL_SCALE)},\n'
     f'  softAnchors: {json.dumps(soft_anchors)},\n'
     f'  definition: {json.dumps({"base": BASE["define"], **{k: {e: SLIDERS[k][1][e].get("define", 0) for e in ("lo", "hi")} for k in ("weight", "muscle")}})},\n'
     f'  shapeBase: {json.dumps(shape_base)},\n'

@@ -2,12 +2,42 @@ import * as THREE from 'three';
 import male from './assets/human-male.js';
 import female from './assets/human-female.js';
 import { Rig, boneDefsFromJoints } from './rig.js';
+import { Loop } from './subdiv.js';
 
 // Realistic mannequin figures from MakeHuman CC0 data (see tools/build_human.py).
 export const MODELS = { male, female };
 export const MODEL_NAMES = Object.keys(MODELS);
 
 const bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+
+function uniqueEdges(index) {
+  const seen = new Set();
+  const edges = [];
+  for (let t = 0; t < index.length; t += 3) {
+    for (let k = 0; k < 3; k++) {
+      const a = index[t + k], b = index[t + ((k + 1) % 3)];
+      const key = a < b ? a * 65536 + b : b * 65536 + a;
+      if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
+    }
+  }
+  return Uint32Array.from(edges);
+}
+
+function vertexNormals(P, index) {
+  const N = new Float32Array(P.length);
+  for (let t = 0; t < index.length; t += 3) {
+    const a = index[t] * 3, b = index[t + 1] * 3, c = index[t + 2] * 3;
+    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const o of [a, b, c]) { N[o] += nx; N[o + 1] += ny; N[o + 2] += nz; }
+  }
+  for (let i = 0; i < N.length; i += 3) {
+    const l = Math.hypot(N[i], N[i + 1], N[i + 2]) || 1;
+    N[i] /= l; N[i + 1] /= l; N[i + 2] /= l;
+  }
+  return N;
+}
 
 // Decoded buffers per model (decoding base64 is the slow part, so do it once).
 const cache = new Map();
@@ -21,24 +51,34 @@ function decoded(data) {
       }
     }
     const index = new Uint16Array(bytes(data.index).buffer);
-    // unique edges, for the groove (cavity) shading that follows the body shape
-    const seen = new Set();
-    const edges = [];
-    for (let t = 0; t < index.length; t += 3) {
-      for (let k = 0; k < 3; k++) {
-        const a = index[t + k], b = index[t + ((k + 1) % 3)];
-        const key = a < b ? a * 65536 + b : b * 65536 + a;
-        if (!seen.has(key)) { seen.add(key); edges.push(a, b); }
-      }
+    const base = new Float32Array(bytes(data.positions).buffer);
+    const n = base.length / 3;
+    // The body is drawn once-subdivided; the sculpt's surface detail is stored per subdivided vertex.
+    const loop = new Loop(index, n);
+    const skinIndex = bytes(data.skinIndex), skinWeight = bytes(data.skinWeight);
+    const bones = data.bones.length;
+    const dense = new Float32Array(n * bones);
+    for (let i = 0; i < n; i++) for (let k = 0; k < 4; k++) dense[i * bones + skinIndex[i * 4 + k]] += skinWeight[i * 4 + k] / 255;
+    const subW = loop.linear(dense, bones);
+    const sIdx = new Uint8Array(loop.count * 4), sW = new Uint8Array(loop.count * 4);
+    for (let i = 0; i < loop.count; i++) {
+      const row = Array.from(subW.subarray(i * bones, (i + 1) * bones), (w, b) => [w, b]).sort((x, y) => y[0] - x[0]).slice(0, 4);
+      const tot = row.reduce((t, r) => t + r[0], 0) || 1;
+      const q = row.map(([w]) => Math.floor((255 * w) / tot));
+      q[0] += 255 - q.reduce((t, v) => t + v, 0); // exact sum of 255
+      row.forEach(([, b], k) => { sIdx[i * 4 + k] = b; sW[i * 4 + k] = q[k]; });
     }
+    const toU8 = (f) => Uint8Array.from(f, (v) => Math.round(v));
     cache.set(data, {
-      base: new Float32Array(bytes(data.positions).buffer),
-      index,
-      edges: Uint16Array.from(edges),
-      skinIndex: bytes(data.skinIndex),
-      skinWeight: bytes(data.skinWeight),
-      ao: bytes(data.ao),
-      soft: bytes(data.soft),
+      base,
+      loop,
+      index: loop.index,
+      edges: uniqueEdges(loop.index),
+      skinIndex: sIdx,
+      skinWeight: sW,
+      ao: toU8(loop.linear(Float32Array.from(bytes(data.ao)), 1)),
+      soft: toU8(loop.linear(Float32Array.from(bytes(data.soft)), 3)),
+      detail: new Int8Array(bytes(data.detail).buffer),
       deltas,
     });
   }
@@ -62,6 +102,7 @@ export function shapeBody(data, values = {}) {
   const positions = Float32Array.from(dec.base);
   const joints = Object.fromEntries(Object.entries(data.joints).map(([k, v]) => [k, [...v]]));
   let definition = data.definition.base;
+  let detail = data.detailScale.base;
   for (const [name, b] of Object.entries(data.shapeBase)) {
     const [end, w] = endWeight(values[name] ?? b, b);
     const delta = end && dec.deltas[name][end];
@@ -76,23 +117,16 @@ export function shapeBody(data, values = {}) {
     }
     for (const k in delta.j) for (let c = 0; c < 3; c++) joints[k][c] += delta.j[k][c] * w;
     if (data.definition[name]) definition += data.definition[name][end] * w;
+    if (data.detailScale[name]) detail += data.detailScale[name][end] * w;
   }
-  return { positions, joints, definition: Math.min(1.3, Math.max(0, definition)) };
+  return { positions, joints, definition: Math.min(1.3, Math.max(0, definition)), detail: Math.min(1.5, Math.max(0.15, detail)) };
 }
 
 // Vertex shading baked into colors: ambient occlusion (fixed) x grooves between muscles,
 // measured on the current shape and deepened with muscle definition.
 function shadeColors(dec, P, definition) {
   const n = P.length / 3;
-  const N = new Float32Array(n * 3);
-  const idx = dec.index;
-  for (let t = 0; t < idx.length; t += 3) {
-    const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
-    const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
-    const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
-    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-    for (const o of [a, b, c]) { N[o] += nx; N[o + 1] += ny; N[o + 2] += nz; }
-  }
+  const N = vertexNormals(P, dec.index);
   const sum = new Float32Array(n * 3), cnt = new Float32Array(n), len = new Float32Array(n);
   const E = dec.edges;
   for (let e = 0; e < E.length; e += 2) {
@@ -104,9 +138,8 @@ function shadeColors(dec, P, definition) {
   let curv = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     const o = i * 3;
-    const nl = Math.hypot(N[o], N[o + 1], N[o + 2]) || 1;
     let d = 0;
-    for (let c = 0; c < 3; c++) d += (sum[o + c] / cnt[i] - P[o + c]) * (N[o + c] / nl);
+    for (let c = 0; c < 3; c++) d += (sum[o + c] / cnt[i] - P[o + c]) * N[o + c];
     curv[i] = d / (len[i] / cnt[i] + 1e-9); // > 0 in grooves
   }
   for (let pass = 0; pass < 4; pass++) {
@@ -118,7 +151,7 @@ function shadeColors(dec, P, definition) {
   }
   const sorted = Float32Array.from(curv).sort();
   const p97 = sorted[Math.floor(n * 0.97)] + 1e-9;
-  const strength = 0.16 + 0.34 * definition;
+  const strength = 0.1 + 0.18 * definition;
   const colors = new Uint8Array(n * 3);
   for (let i = 0; i < n; i++) {
     const cav = 1 - strength * Math.min(1, Math.max(0, curv[i] / p97));
@@ -162,12 +195,20 @@ export function createHumanRig(data = male, shaped = shapeBody(data)) {
 export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   const dec = decoded(data);
   const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(shaped.positions, 3));
+  // subdivide once, then push each vertex along its normal by the sculpt's surface detail
+  const P = dec.loop.positions(shaped.positions);
+  const N = vertexNormals(P, dec.index);
+  const s = data.detailStep * shaped.detail;
+  for (let i = 0; i < dec.detail.length; i++) {
+    const h = dec.detail[i] * s;
+    P[i * 3] += h * N[i * 3]; P[i * 3 + 1] += h * N[i * 3 + 1]; P[i * 3 + 2] += h * N[i * 3 + 2];
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(P, 3));
   g.setIndex(new THREE.BufferAttribute(dec.index, 1));
   g.setAttribute('skinIndex', new THREE.BufferAttribute(dec.skinIndex, 4));
   g.setAttribute('skinWeight', new THREE.BufferAttribute(dec.skinWeight, 4, true));
   // AO (baked) x grooves between muscles (measured on this shape, deeper when lean and muscular).
-  g.setAttribute('color', new THREE.BufferAttribute(shadeColors(dec, shaped.positions, shaped.definition), 3, true));
+  g.setAttribute('color', new THREE.BufferAttribute(shadeColors(dec, P, 0.6 * shaped.detail + shaped.definition), 3, true));
   g.setAttribute('soft', new THREE.BufferAttribute(dec.soft, 3, true));
   g.computeVertexNormals();
 

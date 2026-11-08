@@ -103,7 +103,7 @@ for (const m of ['male', 'female']) {
     }
   }
   ok(moved.length === 0, `${m} every body-part slider changes the body${moved.length ? ` (no change: ${moved})` : ''}`);
-  const lean = shapeBody(data, { muscle: 1, weight: 0 }).definition, soft = shapeBody(data, { muscle: 0, weight: 1 }).definition;
+  const lean = shapeBody(data, { muscle: 1, weight: 0 }).detail, soft = shapeBody(data, { muscle: 0, weight: 1 }).detail;
   ok(lean > soft + 0.5, `${m} muscle definition follows the sliders (${soft.toFixed(2)} → ${lean.toFixed(2)})`);
 }
 {
