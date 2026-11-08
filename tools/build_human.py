@@ -227,128 +227,109 @@ def largest_component(tris, n):
     return tris[roots == best]
 
 
+def vertex_normals(P, tris):
+    fn = np.cross(P[tris[:, 1]] - P[tris[:, 0]], P[tris[:, 2]] - P[tris[:, 0]])
+    N = np.zeros_like(P)
+    for k in range(3):
+        np.add.at(N, tris[:, k], fn)
+    return N / (np.linalg.norm(N, axis=1, keepdims=True) + 1e-12)
+
+
+def ray_hits(O, D, P, T, maxd=0.06, eps=1e-4):
+    """For each ray O + tD (eps < t < maxd): does it hit any triangle of T? (Moller-Trumbore)"""
+    A, B, C = P[T[:, 0]], P[T[:, 1]], P[T[:, 2]]
+    e1, e2 = B - A, C - A
+    hit = np.zeros(len(O), bool)
+    for i in range(0, len(O), 64):
+        o, d = O[i:i + 64, None], D[i:i + 64, None]
+        pv = np.cross(d, e2[None])
+        det = (e1[None] * pv).sum(-1)
+        inv = 1 / np.where(np.abs(det) < 1e-12, 1e-12, det)
+        tv = o - A[None]
+        u = (tv * pv).sum(-1) * inv
+        qv = np.cross(tv, e1[None])
+        v = (d * qv).sum(-1) * inv
+        t = (e2[None] * qv).sum(-1) * inv
+        hit[i:i + 64] = ((u >= 0) & (v >= 0) & (u + v <= 1) & (t > eps) & (t < maxd)).any(1)
+    return hit
+
+
+FEATURE_BONES = ('eye', 'levator', 'oculi', 'orbicularis', 'oris', 'risorius', 'special', 'tongue')
+
+
 def make_faceless(P, tris, Wu, topo=None):
-    """Replace the head with a clean mannequin head: cut the mesh at the top of the neck,
-    then loft rings from the neck edge into an egg fitted to the original cranium."""
-    hw = Wu[:, IDX['head']] / Wu.sum(1)
-    H = P[hw > 0.97]
-    ymax = H[:, 1].max()
-    ychin = np.percentile(H[:, 1], 1)
-    cy = (ymax + ychin) / 2
-    band = H[(H[:, 1] > cy) & (H[:, 1] < cy + 0.06)]
-    cz = (band[:, 2].max() + band[:, 2].min()) / 2
-    c = np.array([0.0, cy, cz])
-    top, rbot = ymax - cy, cy - ychin
-    crown = H[(H[:, 1] > cy + 0.04) & (H[:, 1] < cy + 0.08)]
-    rx = np.percentile(np.abs(crown[:, 0]), 99)
-    rz = (band[:, 2].max() - band[:, 2].min()) / 2
-
-    def egg(dirs):
-        """Skull surface along `dirs`: an egg whose lower front is squared off into a jaw."""
-        u = dirs / np.linalg.norm(dirs, axis=1, keepdims=True)
-        low = np.clip(-u[:, 1], 0, 1)
-        fr = np.clip(u[:, 2], 0, 1)
-        ry = np.where(u[:, 1] > 0, top, rbot)
-        rzq = np.where(u[:, 2] > 0, rz * (1 + 0.1 * low ** 2), rz * (1 - 0.05 * low ** 2))
-        rxq = rx * (1 - 0.1 * low ** 2)
-        side = np.clip(np.abs(u[:, 0]) * 1.5, 0, 1)
-        n = 2 + 2.6 * low ** 1.6 * fr ** 1.4 + 0.8 * low ** 1.6 * side ** 2  # smooth: no creases
-        t = (np.abs(u[:, 0] / rxq) ** n + np.abs(u[:, 1] / ry) ** n + np.abs(u[:, 2] / rzq) ** n) ** (-1 / n)
-        return c + u * t[:, None]
-
-    # 1. Cut along a tilted plane: under the jaw in front, at the skull base behind
-    #    (only around the head: shoulders and arms stay). Shape variants reuse the cut.
-    if topo is None:
-        F = np.array([0.0, ychin - 0.004, cz + rz * 0.55])
-        B = np.array([0.0, cy - 0.07, cz - rz * 0.9])
-        dyz = B - F
-        nrm = np.array([0.0, -dyz[2], dyz[1]])
-        if np.dot(c - F, nrm) < 0:
-            nrm = -nrm
-        near_head = (np.abs(P[:, 0]) < rx * 1.8) & (np.abs(P[:, 2] - cz) < rz * 2.2) & (P[:, 1] > ychin - 0.06)
-        cut = near_head & (((P - F) @ nrm > 0) | (hw > 0.85))  # everything above the plane + the old jaw
-        kept = tris[~cut[tris].any(1)]
-        kept = largest_component(kept, len(P))
-        loops = sorted(boundary_loops(kept), key=len, reverse=True)
-        neck = np.array(loops[0])
-    else:
-        kept, neck = topo['kept'], topo['neck']
-    nc = P[neck].mean(0)
-
-    # 2. Loft. For every direction around the neck the profile is:
-    #    neck edge -> straight under-jaw plane -> jaw line (a soft corner) -> up the skull.
-    #    In front the jaw line is low and well forward of the throat; toward the back it
-    #    rises to the skull base and the corner fades out.
-    theta = np.arctan2(P[neck, 0] - nc[0], P[neck, 2] - nc[2])  # 0 = front
-    back = (1 - np.cos(theta)) / 2  # 0 front .. 1 back
-    dirs_at = lambda ph: np.stack([np.sin(theta) * np.cos(ph), np.sin(ph), np.cos(theta) * np.cos(ph)], 1)
-    phi_j = np.radians(-46 + 20 * back)
-    jaw = egg(dirs_at(phi_j))
-    K_UNDER, K_EGG = 4, 18
-    new_pos, new_w, rings, ring_back = [], [], [neck], [back]
-    n0 = len(P)
-    neck_w = Wu[neck] / Wu[neck].sum(1, keepdims=True)
-    head_w = np.zeros_like(neck_w)
-    head_w[:, IDX['head']] = 1
-
-    def add_ring(pts, w):
-        idx = np.arange(len(pts)) + n0 + len(new_pos)
-        new_pos.extend(pts)
-        new_w.extend(w)
-        rings.append(idx)
-        ring_back.append(back)
-
-    for k in range(1, K_UNDER + 1):
-        f = k / K_UNDER
-        b = f * f * (3 - 2 * f)
-        add_ring(P[neck] * (1 - f) + jaw * f, neck_w * (1 - b) + head_w * b)
-    for k in range(1, K_EGG):
-        g = k / K_EGG
-        add_ring(egg(dirs_at(phi_j + (np.pi / 2 - phi_j) * g)), head_w)
-    apex = n0 + len(new_pos)
-    new_pos.append(c + np.array([0, top, 0]))
-    w_apex = np.zeros(Wu.shape[1]); w_apex[IDX['head']] = 1
-    new_w.append(w_apex)
-
-    new_tris = []
-    m = len(neck)
-    for k in range(len(rings) - 1):
-        r0, r1 = rings[k], rings[k + 1]
-        for j in range(m):
-            j1 = (j + 1) % m
-            new_tris.append((r0[j1], r0[j], r1[j]))
-            new_tris.append((r0[j1], r1[j], r1[j1]))
-    rl = rings[-1]
-    for j in range(m):
-        new_tris.append((rl[(j + 1) % m], rl[j], apex))
-
-    P = np.vstack([P, np.array(new_pos)])
-    Wu = np.vstack([Wu, np.array(new_w)])
-    tris = np.vstack([kept, np.array(new_tris)])
-
-    # 3. Round the corners: barely at the jaw line in front, fully at the back of the neck.
+    """Mannequin face on the real MakeHuman head: skull, jaw, cheekbones and ears stay; the eye
+    sockets and mouth cavity are removed and capped, then the face is faired (bilaplacian) and a
+    heavily smoothed copy of the original features is added back, leaving soft brow, nose and lips."""
     n = len(P)
-    e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
-    e = np.unique(np.sort(e, axis=1), axis=0)
-    A = sp.coo_matrix((np.ones(len(e) * 2), (np.r_[e[:, 0], e[:, 1]], np.r_[e[:, 1], e[:, 0]])), shape=(n, n)).tocsr()
-    deg = np.asarray(A.sum(1)).ravel()
-    amount = np.zeros(n)
-    for k in range(0, K_UNDER + 3):
-        amount[rings[k]] = 0.12 + 0.6 * ring_back[k]
-    below = (np.asarray(A[:, neck].sum(1)).ravel() > 0) & (np.arange(n) < n0)
-    amount[below] = 0.35
-    for _ in range(4):
-        avg = (A @ P) / np.maximum(deg, 1)[:, None]
-        P = P + amount[:, None] * (avg - P)
-
     if topo is None:
-        used = np.unique(tris)
-        remap = -np.ones(n, dtype=np.int64)
+        feat = np.zeros(n)
+        for bone, pairs in json.load(open(f'{MH}/rigs/default_weights.mhw'))['weights'].items():
+            if bone.startswith(FEATURE_BONES):
+                for vi, w in pairs:
+                    if REMAP_ALL[vi] >= 0:
+                        feat[REMAP_ALL[vi]] += w
+        cand = np.where(feat > 0.02)[0]
+        N = vertex_normals(P, tris)
+        c0 = P[cand].mean(0)
+        near = tris[np.abs(P[tris].mean(1) - c0).max(1) < 0.2]
+        interior = np.zeros(n, bool)
+        interior[cand[ray_hits(P[cand] + N[cand] * 2e-4, N[cand], P, near)]] = True  # inside eye sockets / mouth
+        kept = largest_component(tris[~interior[tris].any(1)], n)
+        loops = boundary_loops(kept)
+        fill = []
+        for k, L in enumerate(loops):
+            for j in range(len(L)):
+                fill.append((L[(j + 1) % len(L)], L[j], n + k))
+        T2 = np.vstack([kept, np.array(fill)])
+        n2 = n + len(loops)
+        used = np.unique(T2)
+        # face region: an ellipse spanning brow to lower lip, sized from the eye and mouth openings
+        cen = np.array([P[L].mean(0) for L in loops])
+        eyes = [k for k in range(len(loops)) if abs(cen[k, 0]) > 0.02 and cen[k, 2] > 0.1]
+        mouth = max((k for k in range(len(loops)) if abs(cen[k, 0]) < 0.005), key=lambda k: len(loops[k]))
+        ye, ym = cen[eyes, 1].mean(), cen[mouth, 1]
+        xe = np.abs(cen[eyes, 0]).mean()
+        cy, ry, rx, zmin = (ye + ym) / 2 + 0.13 * (ye - ym), 1.03 * (ye - ym), 2.06 * xe, cen[mouth, 2] - 0.065
+        P2 = np.vstack([P, cen])
+        hw = np.r_[Wu[:, IDX['head']] / Wu.sum(1), np.ones(len(loops))]
+        e = (P2[:, 0] / rx) ** 2 + ((P2[:, 1] - cy) / ry) ** 2
+        region = (e < 1) & (P2[:, 2] > zmin) & (hw > 0.5)
+        region[n:] = True
+        region &= np.isin(np.arange(n2), used)
+        E = np.unique(np.sort(np.concatenate([T2[:, [0, 1]], T2[:, [1, 2]], T2[:, [2, 0]]]), 1), axis=0)
+        A = sp.coo_matrix((np.ones(2 * len(E)), (np.r_[E[:, 0], E[:, 1]], np.r_[E[:, 1], E[:, 0]])), shape=(n2, n2)).tocsr()
+        deg = np.maximum(np.asarray(A.sum(1)).ravel(), 1)
+        Lu = sp.diags(1 / deg) @ (sp.diags(deg) - A)
+        M = (Lu @ Lu).tocsr()
+        free, fixed = np.where(region)[0], np.where(~region)[0]
+        w = np.clip((1 - e) / 0.3, 0, 1)
+        w = w * w * (3 - 2 * w) * region
+        w[n:] = 1
+        band = (w > 0.01) & (w < 0.99)
+        band |= (A @ band.astype(float) > 0)
+        remap = -np.ones(n2, dtype=np.int64)
         remap[used] = np.arange(len(used))
-        topo = dict(kept=kept, neck=neck, used=used, remap=remap)
-        print(f'faceless: neck loop {m} verts, new head {len(new_pos)} verts, open loops left: {len(boundary_loops(tris))}')
-    used, remap = topo['used'], topo['remap']
-    return P[used], remap[tris], Wu[used], topo
+        topo = dict(loops=loops, T2=T2, A=A, deg=deg, free=free, fixed=fixed, Mfc=M[free][:, fixed],
+                    solve=spla.factorized(M[free][:, free].tocsc()), region=region, w=w, band=band,
+                    used=used, remap=remap)
+        print(f'mannequin face: removed {interior.sum()} cavity verts, capped {len(loops)} openings, faired {len(free)} verts')
+    t = topo
+    P2 = np.vstack([P, [P[L].mean(0) for L in t['loops']]])
+    W2 = np.vstack([Wu, [Wu[L].mean(0) for L in t['loops']]])
+    F = P2.copy()
+    for c in range(3):
+        F[t['free'], c] = t['solve'](-t['Mfc'] @ P2[t['fixed'], c])
+    D = P2 - F
+    D[~t['region']] = 0
+    for _ in range(20):  # keep only the broad forms of the original features
+        D = (t['A'] @ D) / t['deg'][:, None] * t['region'][:, None]
+    P2 = P2 + t['w'][:, None] * (F + D - P2)
+    for _ in range(3):  # melt the seam where the faired patch meets the head
+        avg = (t['A'] @ P2) / t['deg'][:, None]
+        P2[t['band']] += 0.5 * (avg[t['band']] - P2[t['band']])
+    used, remap = t['used'], t['remap']
+    return P2[used], remap[t['T2']], W2[used], topo
 
 
 # ---------------- keep body + eyes, triangulate, compact ----------------
@@ -363,6 +344,7 @@ used = np.unique(tris)
 remap = -np.ones(len(V), dtype=np.int64)
 remap[used] = np.arange(len(used))
 tris = remap[tris]
+REMAP_ALL = remap
 P = V[used] * SCALE
 Wu = W[used]
 Wu[Wu.sum(1) < 1e-6, IDX['head']] = 1  # unweighted helper verts (eyeballs) ride the head
@@ -383,14 +365,6 @@ assert len(P) < 65536
 
 
 # ---------------- faceless head: pull face and ears onto a smooth egg ----------------
-def vertex_normals(P, tris):
-    fn = np.cross(P[tris[:, 1]] - P[tris[:, 0]], P[tris[:, 2]] - P[tris[:, 0]])
-    N = np.zeros_like(P)
-    for k in range(3):
-        np.add.at(N, tris[:, k], fn)
-    return N / (np.linalg.norm(N, axis=1, keepdims=True) + 1e-12)
-
-
 def edge_list(tris):
     e = np.concatenate([tris[:, [0, 1]], tris[:, [1, 2]], tris[:, [2, 0]]])
     return np.unique(np.sort(e, axis=1), axis=0)
@@ -435,7 +409,40 @@ for _ in range(4):  # soften
     np.add.at(s, edges[:, 1], curv[edges[:, 0]])
     curv = 0.5 * curv + 0.5 * s / cnt
 cavity = 1 - 0.38 * np.clip(curv / (np.percentile(curv, 97) + 1e-9), 0, 1)
-cavity = np.round(cavity * 255).astype(np.uint8)
+
+
+# ---------------- ambient occlusion: armpits, under the chin, between fingers and legs ----------------
+def bake_ao(P, tris, N, rays=96, reach=0.22, seed=7):
+    """Per-vertex AO (1 = open, 0 = enclosed), cosine-weighted rays, nearer hits count more."""
+    import trimesh
+    mesh = trimesh.Trimesh(P, tris, process=False)
+    rng = np.random.default_rng(seed)
+    u1, u2 = rng.random(rays), rng.random(rays)
+    r, phi = np.sqrt(u1), 2 * np.pi * u2
+    local = np.stack([r * np.cos(phi), r * np.sin(phi), np.sqrt(1 - u1)], 1)  # cosine-weighted hemisphere
+    ref = np.where(np.abs(N[:, :1]) < 0.9, [[1.0, 0, 0]], [[0, 1.0, 0]])
+    tx = np.cross(N, ref); tx /= np.linalg.norm(tx, axis=1, keepdims=True)
+    ty = np.cross(N, tx)
+    occl = np.zeros(len(P))
+    for i in range(0, len(P), 2000):
+        sl = slice(i, i + 2000)
+        D = (local[None, :, :1] * tx[sl, None] + local[None, :, 1:2] * ty[sl, None] + local[None, :, 2:] * N[sl, None]).reshape(-1, 3)
+        O = np.repeat(P[sl] + N[sl] * 1e-4, rays, 0)
+        loc, idx, _ = mesh.ray.intersects_location(O, D, multiple_hits=False)
+        d = np.linalg.norm(loc - O[idx], axis=1)
+        w = np.clip(1 - d / reach, 0, 1) ** 0.7
+        hit = np.zeros(len(O)); np.add.at(hit, idx, w)
+        occl[sl] = hit.reshape(-1, rays).mean(1)
+    return 1 - occl
+
+
+ao = bake_ao(P, tris, N)
+for _ in range(2):  # soften ray noise
+    s_ = np.zeros(n_v); np.add.at(s_, edges[:, 0], ao[edges[:, 1]]); np.add.at(s_, edges[:, 1], ao[edges[:, 0]])
+    ao = 0.5 * ao + 0.5 * s_ / cnt
+shade = cavity * (1 - 0.62 * (1 - ao) ** 1.2)
+print(f'ao: mean {ao.mean():.2f}, min {ao.min():.2f}')
+cavity = np.round(np.clip(shade, 0, 1) * 255).astype(np.uint8)
 
 b64 = lambda a: base64.b64encode(a.tobytes()).decode()
 rnd = lambda d: {k: [round(float(x), 5) for x in v] for k, v in d.items()}

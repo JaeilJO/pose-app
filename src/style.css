@@ -15,7 +15,7 @@ html, body {
   margin: 0;
   height: 100%;
   overflow: hidden;
-  background: radial-gradient(ellipse at 50% 35%, #f7f6f3 0%, #e9e7e2 55%, #d9d6cf 100%);
+  background: radial-gradient(ellipse at 50% 38%, #eceae6 0%, #d9d6d0 55%, #bfbab2 100%);
 }
 
 #scene {

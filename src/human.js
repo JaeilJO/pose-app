@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import male from './assets/human-male.js';
 import female from './assets/human-female.js';
 import { Rig, boneDefsFromJoints } from './rig.js';
-import { addOutline } from './body.js';
 
 // Realistic, faceless figures from MakeHuman CC0 data (see tools/build_human.py).
 export const MODELS = { male, female };
@@ -98,16 +97,15 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   g.setAttribute('color', new THREE.BufferAttribute(dec.colors, 3, true));
   g.computeVertexNormals();
 
+  // Matte sculpting clay: soft highlights, a little velvet on the edges; AO and grooves come from vertex colors.
   const material = new THREE.MeshPhysicalMaterial({
-    color: 0xd8d8d6,
+    color: 0xcdcac5,
     vertexColors: true,
-    roughness: 0.55,
+    roughness: 0.62,
     metalness: 0,
-    clearcoat: 0.15,
-    clearcoatRoughness: 0.5,
-    sheen: 0.3,
-    sheenRoughness: 0.7,
-    sheenColor: new THREE.Color(0xffffff),
+    sheen: 0.35,
+    sheenRoughness: 0.55,
+    sheenColor: new THREE.Color(0xf4f2ee),
   });
 
   // Bind in the source pose (arms out, elbows bent), then move to a relaxed standing pose.
@@ -127,9 +125,9 @@ export function buildHuman(rig, data = male, shaped = shapeBody(data)) {
   rig.update();
   rig.captureRest();
 
-  const outline = addOutline(mesh, []);
+  // No ink outline: form reads from light and AO, like a studio maquette.
   mesh.computeBoundingBox();
-  return { mesh, material, outline, height: mesh.boundingBox.max.y };
+  return { mesh, material, outline: null, height: mesh.boundingBox.max.y };
 }
 
 function standingPose(rig) {

@@ -14,12 +14,12 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.NeutralToneMapping;
-renderer.toneMappingExposure = 1.0;
+renderer.toneMappingExposure = 0.95;
 
 const scene = new THREE.Scene(); // background is a CSS gradient behind the canvas
 const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.32;
+scene.environmentIntensity = 0.22;
 
 const camera = new THREE.PerspectiveCamera(40, 1, 0.05, 60);
 const controls = new OrbitControls(camera, canvas);
@@ -28,25 +28,25 @@ controls.enableDamping = true;
 controls.minDistance = 0.6;
 controls.maxDistance = 12;
 
-// Studio lighting: soft key with shadows, cool fill, warm rim.
-scene.add(new THREE.HemisphereLight(0xffffff, 0xaaa59e, 0.4));
-const sun = new THREE.DirectionalLight(0xfff8f0, 3.1);
-sun.position.set(2.2, 4.2, 2.8);
+// Studio lighting: one strong warm key (form + self-shadow), weak cool fill, bright rim to cut the silhouette.
+scene.add(new THREE.HemisphereLight(0xfbfaf7, 0x8f8a82, 0.24));
+const sun = new THREE.DirectionalLight(0xfff6ec, 3.3);
+sun.position.set(3.1, 4.2, 1.9);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 Object.assign(sun.shadow.camera, { left: -1.6, right: 1.6, top: 2.3, bottom: -0.6, near: 0.5, far: 12 });
 sun.shadow.bias = -0.0004;
-sun.shadow.normalBias = 0.025;
-sun.shadow.radius = 4;
+sun.shadow.normalBias = 0.02;
+sun.shadow.radius = 3;
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0xdfe8ff, 0.45);
+const fill = new THREE.DirectionalLight(0xdbe4ff, 0.32);
 fill.position.set(-3, 2, 1.5);
 scene.add(fill);
-const rimLight = new THREE.DirectionalLight(0xfff0dd, 1.1);
-rimLight.position.set(-1.5, 2.6, -3);
+const rimLight = new THREE.DirectionalLight(0xffffff, 2.3);
+rimLight.position.set(-2.2, 2.8, -2.6);
 scene.add(rimLight);
 
-const ground = new THREE.Mesh(new THREE.CircleGeometry(12, 64), new THREE.ShadowMaterial({ opacity: 0.22 }));
+const ground = new THREE.Mesh(new THREE.CircleGeometry(12, 64), new THREE.ShadowMaterial({ opacity: 0.26 }));
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
@@ -348,7 +348,7 @@ fovInput.addEventListener('input', () => {
 function snapshot() {
   const wasVisible = handleGroup.visible;
   handleGroup.visible = false;
-  scene.background = new THREE.Color(0xeeece8);
+  scene.background = new THREE.Color(0xdedbd5);
   renderer.render(scene, camera);
   const url = canvas.toDataURL('image/png');
   scene.background = null;
