@@ -9,10 +9,11 @@ import { Loop } from './subdiv.js';
 // cuffs, pulled down by gravity, and pushed out of the body by the collision spheres.
 
 export const GARMENTS = {
-  tshirt: { slot: 'top', color: 0x8393a8, thickness: 0.011, sleeves: 0.55 },
-  tank: { slot: 'top', color: 0xa3abb5, thickness: 0.008, sleeves: 0 },
-  pants: { slot: 'bottom', color: 0x3d4450, thickness: 0.012, length: 'ankle', hem: 0.07 },
-  shorts: { slot: 'bottom', color: 0x4d5562, thickness: 0.013, length: 'thigh', hem: 0.085 },
+  // ease: how far the cloth stands off the skin; drape: how straight a top falls from the chest (0..1)
+  tshirt: { slot: 'top', color: 0x8393a8, thickness: 0.011, ease: 0.022, drape: 0.85, sleeves: 0.55 },
+  tank: { slot: 'top', color: 0xa3abb5, thickness: 0.008, ease: 0.013, drape: 0.6, sleeves: 0 },
+  pants: { slot: 'bottom', color: 0x3d4450, thickness: 0.012, ease: 0.018, length: 'ankle', hem: 0.075 },
+  shorts: { slot: 'bottom', color: 0x4d5562, thickness: 0.013, ease: 0.02, length: 'thigh', hem: 0.09 },
   skirt: { slot: 'bottom', color: 0x5d4b60, length: 0.52 },
 };
 
@@ -269,7 +270,7 @@ export function cutGarment(kind, body) {
     const yy = P[src[i] * 3 + 1];
     // only the waistband and the neckline hug the body; hems and cuffs stand off it a little
     const snug = ring[i] <= 1 && (def.slot === 'top' ? yy > hemY + 0.15 : yy > J.hips[1]);
-    lift[i] = snug ? 0.008 : def.slot === 'top' ? def.thickness + 0.006 : def.thickness + (ring[i] <= 1 ? 0.004 : 0);
+    lift[i] = snug ? 0.008 : def.ease + (def.slot === 'bottom' && ring[i] <= 1 ? 0.004 : 0);
     for (let c = 0; c < 3; c++) X[i * 3 + c] = P[src[i] * 3 + c] + NB[src[i] * 3 + c] * lift[i];
   }
   const E = edgesOf(idx);
@@ -284,22 +285,32 @@ export function cutGarment(kind, body) {
     }
   }
   trimOpenings(X, m, bnb, ring, E);
-  for (let it = 0; it < 8; it++) {
-    const acc = new Float32Array(m * 3);
-    for (let e = 0; e < E.length; e += 2) {
-      const a = E[e] * 3, b = E[e + 1] * 3;
-      for (let c = 0; c < 3; c++) { acc[a + c] += X[b + c]; acc[b + c] += X[a + c]; }
+  // Drape: the cloth is a membrane over the body, not a skin. Smoothing with a floor (skin + ease) keeps it
+  // off convex parts and lets it span the hollows: between the pecs, under the bust, the small of the back,
+  // the seat. Body detail (muscle grooves) no longer shows through.
+  const floor = (i) => {
+    const o = src[i] * 3;
+    const h = (X[i * 3] - P[o]) * NB[o] + (X[i * 3 + 1] - P[o + 1]) * NB[o + 1] + (X[i * 3 + 2] - P[o + 2]) * NB[o + 2];
+    if (h < lift[i]) for (let c = 0; c < 3; c++) X[i * 3 + c] += (lift[i] - h) * NB[o + c];
+  };
+  const tension = (its) => {
+    for (let it = 0; it < its; it++) {
+      const acc = new Float32Array(m * 3);
+      for (let e = 0; e < E.length; e += 2) {
+        const a = E[e] * 3, b = E[e + 1] * 3;
+        for (let c = 0; c < 3; c++) { acc[a + c] += X[b + c]; acc[b + c] += X[a + c]; }
+      }
+      for (let i = 0; i < m; i++) {
+        if (ring[i] === 0) continue;
+        for (let c = 0; c < 3; c++) X[i * 3 + c] += 0.5 * (acc[i * 3 + c] / deg[i] - X[i * 3 + c]);
+        floor(i);
+      }
     }
-    for (let i = 0; i < m; i++) {
-      if (ring[i] === 0) continue;
-      for (let c = 0; c < 3; c++) X[i * 3 + c] += 0.5 * (acc[i * 3 + c] / deg[i] - X[i * 3 + c]);
-      // never sink below the lift
-      const o = src[i] * 3;
-      const h = (X[i * 3] - P[o]) * NB[o] + (X[i * 3 + 1] - P[o + 1]) * NB[o + 1] + (X[i * 3 + 2] - P[o + 2]) * NB[o + 2];
-      if (h < 0.8 * lift[i]) for (let c = 0; c < 3; c++) X[i * 3 + c] += (0.8 * lift[i] - h) * NB[o + c];
-    }
-  }
-  if (def.hem) looseLegs(X, src, m, def, J, P, E, deg, ring);
+  };
+  tension(50);
+  if (def.drape) hang(X, src, m, def, J, P, dom, B, ring);
+  tension(4);
+  if (def.hem) { looseLegs(X, src, m, def, J, P, E, deg, ring); tension(3); }
   const sIdx = new Uint8Array(m * 4), sW = new Uint8Array(m * 4), sSoft = new Uint8Array(m * 3);
   for (let i = 0; i < m; i++) {
     sIdx.set(skinIndex.subarray(src[i] * 4, src[i] * 4 + 4), i * 4);
@@ -334,6 +345,43 @@ export function cutGarment(kind, body) {
   const hidden = new Uint8Array(T.length / 3);
   for (let t = 0; t < T.length; t += 3) if (inner.has(T[t]) && inner.has(T[t + 1]) && inner.has(T[t + 2])) hidden[t / 3] = 1;
   return { kind, def, ...fine, pull, ceil, gravity: CFG.gravity, hidden };
+}
+
+// A top falls from the widest part of the chest (bust, pecs, shoulder blades) instead of following the
+// waist in: below the chest each column of cloth keeps (drape x) the chest's radius around the torso axis.
+function hang(X, src, m, def, J, P, dom, B, ring) {
+  const trunk = new Set(['hips', 'spine', 'chest'].map(B));
+  const yb = J.chest[1];
+  const BINS = 48;
+  let cz = 0, cnt = 0;
+  for (let i = 0; i < m; i++) if (trunk.has(dom[src[i]]) && Math.abs(X[i * 3 + 1] - yb) < 0.03) { cz += X[i * 3 + 2]; cnt++; }
+  cz /= cnt || 1;
+  const bin = (x, z) => Math.floor(((Math.atan2(z - cz, x) + Math.PI) / (2 * Math.PI)) * BINS) % BINS;
+  const Rmax = new Float32Array(BINS);
+  for (let i = 0; i < m; i++) {
+    if (!trunk.has(dom[src[i]])) continue;
+    const x = X[i * 3], y = X[i * 3 + 1], z = X[i * 3 + 2];
+    if (y < yb - 0.08 || y > yb + 0.04) continue;
+    const k = bin(x, z);
+    Rmax[k] = Math.max(Rmax[k], Math.hypot(x, z - cz));
+  }
+  for (let it = 0; it < 2; it++) { // fill and soften the profile
+    const c = Float32Array.from(Rmax);
+    for (let k = 0; k < BINS; k++) Rmax[k] = Math.max(c[k], 0.5 * (c[(k + 1) % BINS] + c[(k + BINS - 1) % BINS]));
+  }
+  for (let i = 0; i < m; i++) {
+    if (!trunk.has(dom[src[i]])) continue;
+    const x = X[i * 3], y = X[i * 3 + 1], z = X[i * 3 + 2];
+    if (y >= yb) continue;
+    const t = Math.min(1, (yb - y) / 0.08);
+    const blend = t * t * (3 - 2 * t);
+    const r = Math.hypot(x, z - cz);
+    const R = Rmax[bin(x, z)];
+    if (r >= R || r < 1e-6) continue;
+    const f = 1 + (blend * def.drape * (R - r)) / r; // fill (drape x) the hollow below the chest
+    X[i * 3] = x * f;
+    X[i * 3 + 2] = cz + (z - cz) * f;
+  }
 }
 
 // Trouser legs hang from the seat and thigh instead of hugging knee and calf: below the crotch each leg
